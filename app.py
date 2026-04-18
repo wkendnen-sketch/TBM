@@ -18,6 +18,7 @@ TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 BASE_FONT_SIZE_PT = 30
 TITLE_TEXT = "설명/说明"
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
+APP_VERSION = "GPT-DEBUG-2026-04-18-01"
 
 
 @dataclass
@@ -42,6 +43,7 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
 - 설명 금지
 - 코드블록 금지
 - 각 항목은 zh, vi, my 포함
+- 입력 개수와 출력 개수는 반드시 같아야 함
 
 입력:
 {joined_text}
@@ -74,7 +76,7 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
     data = resp.json()
 
     text = ""
-    if "output_text" in data:
+    if "output_text" in data and data["output_text"]:
         text = data["output_text"]
     else:
         for item in data.get("output", []):
@@ -83,7 +85,17 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
                     text += c.get("text", "")
 
     text = text.replace("```json", "").replace("```", "").strip()
-    return json.loads(text)
+    parsed = json.loads(text)
+
+    if not isinstance(parsed, list):
+        raise ValueError("GPT 응답이 배열이 아닙니다.")
+
+    if len(parsed) != len(korean_list):
+        raise ValueError(
+            f"번역 개수 불일치: 입력 {len(korean_list)} / 출력 {len(parsed)}"
+        )
+
+    return parsed
 
 
 def iter_all_shapes(shapes):
@@ -120,7 +132,6 @@ def is_red_fill(shape):
 
 
 def find_picture_area(slide):
-    # 1순위: 빨간 도형
     red_shapes = []
     for shape in iter_all_shapes(slide.shapes):
         try:
@@ -134,12 +145,10 @@ def find_picture_area(slide):
         red_shapes.sort(key=lambda x: (x[0], x[1]))
         return red_shapes[0][2]
 
-    # 2순위: '사진대지' 텍스트 상자
     for shape in iter_all_shapes(slide.shapes):
         if has_text(shape) and "사진대지" in get_text(shape):
             return shape
 
-    # 3순위: 가장 큰 상단 도형
     candidates = []
     for shape in iter_all_shapes(slide.shapes):
         try:
@@ -198,11 +207,9 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
         slide = prs.slides[i]
 
-        # 사진 삽입
         pic_area = find_picture_area(slide)
         add_picture_cover(slide, item.image_path, pic_area)
 
-        # 텍스트 삽입
         pic_bottom = pic_area.top + pic_area.height
         txt_shapes = [
             s for s in iter_all_shapes(slide.shapes)
@@ -219,7 +226,6 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
             run.text = txt
             run.font.size = Pt(BASE_FONT_SIZE_PT)
 
-    # 남는 슬라이드 삭제
     for idx in range(len(prs.slides) - 1, len(slide_data_list) - 1, -1):
         slide_id = prs.slides._sldIdLst[idx]
         prs.part.drop_rel(slide_id.rId)
@@ -233,7 +239,10 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
-    st.title("🚧 TBM 교육자료 자동 번역 생성기")
+    st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+
+    st.caption(f"템플릿 경로: {TEMPLATE_PPT}")
+    st.caption(f"템플릿 존재 여부: {os.path.exists(TEMPLATE_PPT)}")
 
     if "GPT_API_KEY" not in st.secrets:
         st.warning("Secrets에 GPT_API_KEY 설정 필요")
@@ -246,6 +255,8 @@ def main():
     )
 
     if files:
+        st.write("업로드 파일 개수:", len(files))
+
         slide_inputs = []
         temp_paths = []
 
@@ -273,14 +284,35 @@ def main():
             try:
                 with st.spinner("번역 중..."):
                     ko_list = [s.ko for s in slide_inputs]
+
+                    st.subheader("디버그: 입력 한국어 목록")
+                    st.write(ko_list)
+
                     translations = translate_batch_with_gpt(
                         st.secrets["GPT_API_KEY"], ko_list
                     )
+
+                    st.subheader("디버그: GPT 번역 결과")
+                    st.json(translations)
 
                     for s, tr in zip(slide_inputs, translations):
                         s.zh = tr["zh"]
                         s.vi = tr["vi"]
                         s.my = tr["my"]
+
+                    debug_slide_data = [
+                        {
+                            "ko": s.ko,
+                            "zh": s.zh,
+                            "vi": s.vi,
+                            "my": s.my,
+                            "image_path": s.image_path
+                        }
+                        for s in slide_inputs
+                    ]
+
+                    st.subheader("디버그: PPT 반영 직전 데이터")
+                    st.json(debug_slide_data)
 
                 with st.spinner("PPT 생성 중..."):
                     ppt = build_ppt(slide_inputs)
@@ -289,7 +321,8 @@ def main():
                 st.download_button(
                     "PPT 다운로드",
                     ppt,
-                    file_name=OUTPUT_PPT_NAME
+                    file_name=OUTPUT_PPT_NAME,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
                 )
 
             except Exception as e:
