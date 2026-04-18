@@ -120,7 +120,7 @@ def is_red_fill(shape):
 
 
 def find_picture_area(slide):
-    # 1순위: 빨간색 도형 찾기
+    # 1순위: 빨간 도형
     red_shapes = []
     for shape in iter_all_shapes(slide.shapes):
         try:
@@ -155,7 +155,7 @@ def find_picture_area(slide):
     return candidates[0][2]
 
 
-def add_picture_fit(slide, image_path, target_shape):
+def add_picture_cover(slide, image_path, target_shape):
     left = target_shape.left
     top = target_shape.top
     width = target_shape.width
@@ -167,26 +167,26 @@ def add_picture_fit(slide, image_path, target_shape):
     img_ratio = img_w / img_h
     box_ratio = width / height
 
-    if img_ratio > box_ratio:
-        # 가로가 더 긴 이미지
-        new_width = width
-        new_height = int(width / img_ratio)
-        pic_left = left
-        pic_top = top + int((height - new_height) / 2)
-    else:
-        # 세로가 더 긴 이미지
-        new_height = height
-        new_width = int(height * img_ratio)
-        pic_top = top
-        pic_left = left + int((width - new_width) / 2)
-
-    slide.shapes.add_picture(
+    pic = slide.shapes.add_picture(
         image_path,
-        pic_left,
-        pic_top,
-        width=new_width,
-        height=new_height
+        left,
+        top,
+        width=width,
+        height=height
     )
+
+    if img_ratio > box_ratio:
+        crop = (1 - (box_ratio / img_ratio)) / 2
+        pic.crop_left = crop
+        pic.crop_right = crop
+        pic.crop_top = 0
+        pic.crop_bottom = 0
+    else:
+        crop = (1 - (img_ratio / box_ratio)) / 2
+        pic.crop_top = crop
+        pic.crop_bottom = crop
+        pic.crop_left = 0
+        pic.crop_right = 0
 
 
 def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
@@ -198,9 +198,11 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
         slide = prs.slides[i]
 
+        # 사진 삽입
         pic_area = find_picture_area(slide)
-        add_picture_fit(slide, item.image_path, pic_area)
+        add_picture_cover(slide, item.image_path, pic_area)
 
+        # 텍스트 삽입
         pic_bottom = pic_area.top + pic_area.height
         txt_shapes = [
             s for s in iter_all_shapes(slide.shapes)
@@ -217,6 +219,7 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
             run.text = txt
             run.font.size = Pt(BASE_FONT_SIZE_PT)
 
+    # 남는 슬라이드 삭제
     for idx in range(len(prs.slides) - 1, len(slide_data_list) - 1, -1):
         slide_id = prs.slides._sldIdLst[idx]
         prs.part.drop_rel(slide_id.rId)
