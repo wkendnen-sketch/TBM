@@ -7,7 +7,6 @@ from typing import List
 
 import requests
 import streamlit as st
-from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
@@ -15,10 +14,16 @@ from pptx.util import Pt
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
-BASE_FONT_SIZE_PT = 30
+BASE_FONT_SIZE_PT = 35
 TITLE_TEXT = "설명/说明"
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
-APP_VERSION = "GPT-DEBUG-2026-04-18-01"
+APP_VERSION = "GPT-PLACEHOLDER-PHOTOBOX-01"
+
+PHOTO_BOX_TEXT = "PHOTO_BOX"
+KO_BOX_TEXT = "1"
+ZH_BOX_TEXT = "2"
+VI_BOX_TEXT = "3"
+MY_BOX_TEXT = "4"
 
 
 @dataclass
@@ -116,52 +121,20 @@ def get_text(shape):
     return ""
 
 
-def is_red_fill(shape):
-    try:
-        if not hasattr(shape, "fill"):
-            return False
-        if shape.fill is None:
-            return False
-        fore = shape.fill.fore_color
-        if not hasattr(fore, "rgb") or fore.rgb is None:
-            return False
-        rgb = str(fore.rgb).upper()
-        return rgb in ["FF0000", "C00000", "FF1F1F", "D32F2F"]
-    except Exception:
-        return False
+def clear_and_set_text(shape, text: str, size_pt: int):
+    tf = shape.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(size_pt)
 
 
-def find_picture_area(slide):
-    red_shapes = []
+def find_shape_by_exact_text(slide, target_text: str):
     for shape in iter_all_shapes(slide.shapes):
-        try:
-            if is_red_fill(shape):
-                area = shape.width * shape.height
-                red_shapes.append((shape.top, -area, shape))
-        except Exception:
-            pass
-
-    if red_shapes:
-        red_shapes.sort(key=lambda x: (x[0], x[1]))
-        return red_shapes[0][2]
-
-    for shape in iter_all_shapes(slide.shapes):
-        if has_text(shape) and "사진대지" in get_text(shape):
+        if has_text(shape) and get_text(shape) == target_text:
             return shape
-
-    candidates = []
-    for shape in iter_all_shapes(slide.shapes):
-        try:
-            area = shape.width * shape.height
-            candidates.append((shape.top, -area, shape))
-        except Exception:
-            pass
-
-    if not candidates:
-        raise ValueError("사진 영역을 찾지 못했습니다.")
-
-    candidates.sort(key=lambda x: (x[0], x[1]))
-    return candidates[0][2]
+    return None
 
 
 def add_picture_cover(slide, image_path, target_shape):
@@ -169,12 +142,6 @@ def add_picture_cover(slide, image_path, target_shape):
     top = target_shape.top
     width = target_shape.width
     height = target_shape.height
-
-    with Image.open(image_path) as img:
-        img_w, img_h = img.size
-
-    img_ratio = img_w / img_h
-    box_ratio = width / height
 
     pic = slide.shapes.add_picture(
         image_path,
@@ -184,47 +151,70 @@ def add_picture_cover(slide, image_path, target_shape):
         height=height
     )
 
-    if img_ratio > box_ratio:
-        crop = (1 - (box_ratio / img_ratio)) / 2
+    image_w = 1.0
+    image_h = 1.0
+    box_ratio = float(width) / float(height)
+
+    from PIL import Image
+    with Image.open(image_path) as img:
+        image_w, image_h = img.size
+
+    image_ratio = float(image_w) / float(image_h)
+
+    if image_ratio > box_ratio:
+        crop = (1.0 - (box_ratio / image_ratio)) / 2.0
         pic.crop_left = crop
         pic.crop_right = crop
         pic.crop_top = 0
         pic.crop_bottom = 0
     else:
-        crop = (1 - (img_ratio / box_ratio)) / 2
+        crop = (1.0 - (image_ratio / box_ratio)) / 2.0
         pic.crop_top = crop
         pic.crop_bottom = crop
         pic.crop_left = 0
         pic.crop_right = 0
 
 
+def fill_slide_by_placeholders(slide, item: SlideData):
+    photo_shape = find_shape_by_exact_text(slide, PHOTO_BOX_TEXT)
+    ko_shape = find_shape_by_exact_text(slide, KO_BOX_TEXT)
+    zh_shape = find_shape_by_exact_text(slide, ZH_BOX_TEXT)
+    vi_shape = find_shape_by_exact_text(slide, VI_BOX_TEXT)
+    my_shape = find_shape_by_exact_text(slide, MY_BOX_TEXT)
+
+    missing = []
+    for name, shp in [
+        ("PHOTO_BOX", photo_shape),
+        ("1", ko_shape),
+        ("2", zh_shape),
+        ("3", vi_shape),
+        ("4", my_shape),
+    ]:
+        if shp is None:
+            missing.append(name)
+
+    if missing:
+        raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
+
+    add_picture_cover(slide, item.image_path, photo_shape)
+
+    clear_and_set_text(ko_shape, item.ko, BASE_FONT_SIZE_PT)
+    clear_and_set_text(zh_shape, item.zh, BASE_FONT_SIZE_PT)
+    clear_and_set_text(vi_shape, item.vi, BASE_FONT_SIZE_PT)
+    clear_and_set_text(my_shape, item.my, BASE_FONT_SIZE_PT)
+
+
 def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
+    if not os.path.exists(TEMPLATE_PPT):
+        raise FileNotFoundError(f"템플릿 파일이 없습니다: {TEMPLATE_PPT}")
+
     prs = Presentation(TEMPLATE_PPT)
 
     for i, item in enumerate(slide_data_list):
         if i >= len(prs.slides):
             break
-
         slide = prs.slides[i]
-
-        pic_area = find_picture_area(slide)
-        add_picture_cover(slide, item.image_path, pic_area)
-
-        pic_bottom = pic_area.top + pic_area.height
-        txt_shapes = [
-            s for s in iter_all_shapes(slide.shapes)
-            if has_text(s) and s.top >= pic_bottom - 50000
-        ]
-        txt_shapes.sort(key=lambda s: (s.top, s.left))
-
-        contents = [TITLE_TEXT, item.ko, item.zh, item.vi, item.my]
-
-        for shape, txt in zip(txt_shapes, contents):
-            tf = shape.text_frame
-            tf.clear()
-            run = tf.paragraphs[0].add_run()
-            run.text = txt
-            run.font.size = Pt(BASE_FONT_SIZE_PT)
+        fill_slide_by_placeholders(slide, item)
 
     for idx in range(len(prs.slides) - 1, len(slide_data_list) - 1, -1):
         slide_id = prs.slides._sldIdLst[idx]
@@ -241,9 +231,6 @@ def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
 
-    st.caption(f"템플릿 경로: {TEMPLATE_PPT}")
-    st.caption(f"템플릿 존재 여부: {os.path.exists(TEMPLATE_PPT)}")
-
     if "GPT_API_KEY" not in st.secrets:
         st.warning("Secrets에 GPT_API_KEY 설정 필요")
         st.stop()
@@ -251,12 +238,10 @@ def main():
     files = st.file_uploader(
         "사진 업로드",
         accept_multiple_files=True,
-        type=["jpg", "png", "jpeg"]
+        type=["jpg", "png", "jpeg", "webp"]
     )
 
     if files:
-        st.write("업로드 파일 개수:", len(files))
-
         slide_inputs = []
         temp_paths = []
 
@@ -272,47 +257,30 @@ def main():
                     key=f"ko_{idx}"
                 )
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                     tmp.write(f.getbuffer())
                     temp_paths.append(tmp.name)
-
-                    slide_inputs.append(
-                        SlideData(tmp.name, ko_input, "", "", "")
-                    )
+                    slide_inputs.append(SlideData(tmp.name, ko_input, "", "", ""))
 
         if st.button("PPT 생성"):
             try:
                 with st.spinner("번역 중..."):
                     ko_list = [s.ko for s in slide_inputs]
 
-                    st.subheader("디버그: 입력 한국어 목록")
-                    st.write(ko_list)
+                    if any(not x.strip() for x in ko_list):
+                        raise ValueError("빈 한국어 문구가 있습니다. 모든 슬라이드 문구를 입력하세요.")
 
                     translations = translate_batch_with_gpt(
-                        st.secrets["GPT_API_KEY"], ko_list
+                        st.secrets["GPT_API_KEY"],
+                        ko_list
                     )
-
-                    st.subheader("디버그: GPT 번역 결과")
-                    st.json(translations)
 
                     for s, tr in zip(slide_inputs, translations):
                         s.zh = tr["zh"]
                         s.vi = tr["vi"]
                         s.my = tr["my"]
-
-                    debug_slide_data = [
-                        {
-                            "ko": s.ko,
-                            "zh": s.zh,
-                            "vi": s.vi,
-                            "my": s.my,
-                            "image_path": s.image_path
-                        }
-                        for s in slide_inputs
-                    ]
-
-                    st.subheader("디버그: PPT 반영 직전 데이터")
-                    st.json(debug_slide_data)
 
                 with st.spinner("PPT 생성 중..."):
                     ppt = build_ppt(slide_inputs)
