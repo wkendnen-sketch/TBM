@@ -17,7 +17,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
-APP_VERSION = "GPT-FINAL-TABLE-CELL-01"
+APP_VERSION = "26년 4월 버전"
 
 PHOTO_BOX_TEXT = "PHOTO_BOX"
 KO_BOX_TEXT = "1"
