@@ -7,6 +7,7 @@ from typing import List
 
 import requests
 import streamlit as st
+from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
@@ -15,9 +16,8 @@ from pptx.util import Pt
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 BASE_FONT_SIZE_PT = 35
-TITLE_TEXT = "설명/说明"
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
-APP_VERSION = "GPT-PLACEHOLDER-PHOTOBOX-01"
+APP_VERSION = "GPT-FINAL-TABLE-CELL-01"
 
 PHOTO_BOX_TEXT = "PHOTO_BOX"
 KO_BOX_TEXT = "1"
@@ -55,11 +55,11 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
 
 출력:
 [
- {{
-  "zh":"중국어",
-  "vi":"베트남어",
-  "my":"미얀마어"
- }}
+  {{
+    "zh":"중국어",
+    "vi":"베트남어",
+    "my":"미얀마어"
+  }}
 ]
 """
 
@@ -100,6 +100,10 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
             f"번역 개수 불일치: 입력 {len(korean_list)} / 출력 {len(parsed)}"
         )
 
+    for item in parsed:
+        if not all(k in item for k in ("zh", "vi", "my")):
+            raise ValueError("번역 결과에 zh, vi, my 키가 없습니다.")
+
     return parsed
 
 
@@ -115,26 +119,49 @@ def has_text(shape):
     return hasattr(shape, "has_text_frame") and shape.has_text_frame
 
 
-def get_text(shape):
-    if has_text(shape):
-        return shape.text.strip()
-    return ""
+def normalize_text(text: str) -> str:
+    return str(text).strip().replace("\n", "").replace("\r", "")
 
 
-def clear_and_set_text(shape, text: str, size_pt: int):
-    tf = shape.text_frame
-    tf.clear()
-    p = tf.paragraphs[0]
-    run = p.add_run()
-    run.text = text
-    run.font.size = Pt(size_pt)
+def find_text_target(slide, target_text: str):
+    target = normalize_text(target_text)
 
-
-def find_shape_by_exact_text(slide, target_text: str):
+    # 1) 일반 텍스트 상자 / 그룹 내부
     for shape in iter_all_shapes(slide.shapes):
-        if has_text(shape) and get_text(shape) == target_text:
-            return shape
+        if has_text(shape):
+            if normalize_text(shape.text) == target:
+                return ("shape", shape)
+
+    # 2) 표 셀
+    for shape in iter_all_shapes(slide.shapes):
+        if hasattr(shape, "has_table") and shape.has_table:
+            table = shape.table
+            for row in table.rows:
+                for cell in row.cells:
+                    if normalize_text(cell.text) == target:
+                        return ("cell", cell)
+
     return None
+
+
+def set_target_text(target_obj, text: str, size_pt: int):
+    kind, obj = target_obj
+
+    if kind == "shape":
+        tf = obj.text_frame
+        tf.clear()
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = text
+        run.font.size = Pt(size_pt)
+
+    elif kind == "cell":
+        tf = obj.text_frame
+        tf.clear()
+        p = tf.paragraphs[0]
+        run = p.add_run()
+        run.text = text
+        run.font.size = Pt(size_pt)
 
 
 def add_picture_cover(slide, image_path, target_shape):
@@ -142,6 +169,12 @@ def add_picture_cover(slide, image_path, target_shape):
     top = target_shape.top
     width = target_shape.width
     height = target_shape.height
+
+    with Image.open(image_path) as img:
+        img_w, img_h = img.size
+
+    img_ratio = float(img_w) / float(img_h)
+    box_ratio = float(width) / float(height)
 
     pic = slide.shapes.add_picture(
         image_path,
@@ -151,24 +184,14 @@ def add_picture_cover(slide, image_path, target_shape):
         height=height
     )
 
-    image_w = 1.0
-    image_h = 1.0
-    box_ratio = float(width) / float(height)
-
-    from PIL import Image
-    with Image.open(image_path) as img:
-        image_w, image_h = img.size
-
-    image_ratio = float(image_w) / float(image_h)
-
-    if image_ratio > box_ratio:
-        crop = (1.0 - (box_ratio / image_ratio)) / 2.0
+    if img_ratio > box_ratio:
+        crop = (1.0 - (box_ratio / img_ratio)) / 2.0
         pic.crop_left = crop
         pic.crop_right = crop
         pic.crop_top = 0
         pic.crop_bottom = 0
     else:
-        crop = (1.0 - (image_ratio / box_ratio)) / 2.0
+        crop = (1.0 - (img_ratio / box_ratio)) / 2.0
         pic.crop_top = crop
         pic.crop_bottom = crop
         pic.crop_left = 0
@@ -176,32 +199,36 @@ def add_picture_cover(slide, image_path, target_shape):
 
 
 def fill_slide_by_placeholders(slide, item: SlideData):
-    photo_shape = find_shape_by_exact_text(slide, PHOTO_BOX_TEXT)
-    ko_shape = find_shape_by_exact_text(slide, KO_BOX_TEXT)
-    zh_shape = find_shape_by_exact_text(slide, ZH_BOX_TEXT)
-    vi_shape = find_shape_by_exact_text(slide, VI_BOX_TEXT)
-    my_shape = find_shape_by_exact_text(slide, MY_BOX_TEXT)
+    photo_target = find_text_target(slide, PHOTO_BOX_TEXT)
+    ko_target = find_text_target(slide, KO_BOX_TEXT)
+    zh_target = find_text_target(slide, ZH_BOX_TEXT)
+    vi_target = find_text_target(slide, VI_BOX_TEXT)
+    my_target = find_text_target(slide, MY_BOX_TEXT)
 
     missing = []
-    for name, shp in [
-        ("PHOTO_BOX", photo_shape),
-        ("1", ko_shape),
-        ("2", zh_shape),
-        ("3", vi_shape),
-        ("4", my_shape),
+    for name, obj in [
+        ("PHOTO_BOX", photo_target),
+        ("1", ko_target),
+        ("2", zh_target),
+        ("3", vi_target),
+        ("4", my_target),
     ]:
-        if shp is None:
+        if obj is None:
             missing.append(name)
 
     if missing:
         raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
 
-    add_picture_cover(slide, item.image_path, photo_shape)
+    photo_kind, photo_obj = photo_target
+    if photo_kind != "shape":
+        raise ValueError("PHOTO_BOX는 텍스트 상자/도형이어야 합니다.")
 
-    clear_and_set_text(ko_shape, item.ko, BASE_FONT_SIZE_PT)
-    clear_and_set_text(zh_shape, item.zh, BASE_FONT_SIZE_PT)
-    clear_and_set_text(vi_shape, item.vi, BASE_FONT_SIZE_PT)
-    clear_and_set_text(my_shape, item.my, BASE_FONT_SIZE_PT)
+    add_picture_cover(slide, item.image_path, photo_obj)
+
+    set_target_text(ko_target, item.ko, BASE_FONT_SIZE_PT)
+    set_target_text(zh_target, item.zh, BASE_FONT_SIZE_PT)
+    set_target_text(vi_target, item.vi, BASE_FONT_SIZE_PT)
+    set_target_text(my_target, item.my, BASE_FONT_SIZE_PT)
 
 
 def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
