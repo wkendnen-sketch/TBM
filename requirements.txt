@@ -1,4 +1,5 @@
 streamlit
 python-pptx
 Pillow
-requests
+google-genai
+pillow-heif

@@ -12,12 +12,18 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
 
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except Exception:
+    pass
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
-APP_VERSION = "26년 4월 버전"
+APP_VERSION = "26년 5월 버전"
 
 PHOTO_BOX_TEXT = "PHOTO_BOX"
 KO_BOX_TEXT = "1"
@@ -33,6 +39,48 @@ class SlideData:
     zh: str
     vi: str
     my: str
+
+
+def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
+    """
+    아이폰 HEIC / HEIF / MPO 포함 이미지를 JPG로 변환.
+    자동 회전은 하지 않음.
+    """
+    try:
+        img = Image.open(input_path)
+
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        width, height = img.size
+        longest = max(width, height)
+
+        if longest > max_size:
+            ratio = max_size / longest
+            new_width = int(width * ratio)
+            new_height = int(height * ratio)
+            img = img.resize((new_width, new_height), Image.LANCZOS)
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        output_path = tmp.name
+        tmp.close()
+
+        img.save(
+            output_path,
+            format="JPEG",
+            quality=quality,
+            optimize=True
+        )
+
+        return output_path
+
+    except Exception as e:
+        raise ValueError(f"이미지 변환 실패: {e}")
 
 
 def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
@@ -126,13 +174,11 @@ def normalize_text(text: str) -> str:
 def find_text_target(slide, target_text: str):
     target = normalize_text(target_text)
 
-    # 1) 일반 텍스트 상자 / 그룹 내부
     for shape in iter_all_shapes(slide.shapes):
         if has_text(shape):
             if normalize_text(shape.text) == target:
                 return ("shape", shape)
 
-    # 2) 표 셀
     for shape in iter_all_shapes(slide.shapes):
         if hasattr(shape, "has_table") and shape.has_table:
             table = shape.table
@@ -147,55 +193,26 @@ def find_text_target(slide, target_text: str):
 def set_target_text(target_obj, text: str, size_pt: int):
     kind, obj = target_obj
 
-    if kind == "shape":
-        tf = obj.text_frame
-        tf.clear()
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = text
-        run.font.size = Pt(size_pt)
-
-    elif kind == "cell":
-        tf = obj.text_frame
-        tf.clear()
-        p = tf.paragraphs[0]
-        run = p.add_run()
-        run.text = text
-        run.font.size = Pt(size_pt)
+    tf = obj.text_frame
+    tf.clear()
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(size_pt)
 
 
 def add_picture_cover(slide, image_path, target_shape):
-    left = target_shape.left
-    top = target_shape.top
-    width = target_shape.width
-    height = target_shape.height
-
-    with Image.open(image_path) as img:
-        img_w, img_h = img.size
-
-    img_ratio = float(img_w) / float(img_h)
-    box_ratio = float(width) / float(height)
-
-    pic = slide.shapes.add_picture(
+    """
+    PHOTO_BOX 크기에 그대로 사진 삽입.
+    사진을 회전하지 않고, 박스 크기에 맞게 가로/세로만 조절.
+    """
+    slide.shapes.add_picture(
         image_path,
-        left,
-        top,
-        width=width,
-        height=height
+        target_shape.left,
+        target_shape.top,
+        width=target_shape.width,
+        height=target_shape.height
     )
-
-    if img_ratio > box_ratio:
-        crop = (1.0 - (box_ratio / img_ratio)) / 2.0
-        pic.crop_left = crop
-        pic.crop_right = crop
-        pic.crop_top = 0
-        pic.crop_bottom = 0
-    else:
-        crop = (1.0 - (img_ratio / box_ratio)) / 2.0
-        pic.crop_top = crop
-        pic.crop_bottom = crop
-        pic.crop_left = 0
-        pic.crop_right = 0
 
 
 def fill_slide_by_placeholders(slide, item: SlideData):
@@ -265,7 +282,7 @@ def main():
     files = st.file_uploader(
         "사진 업로드",
         accept_multiple_files=True,
-        type=["jpg", "png", "jpeg", "webp"]
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"]
     )
 
     if files:
@@ -275,7 +292,18 @@ def main():
         for idx, f in enumerate(files):
             with st.expander(f"슬라이드 #{idx+1}", expanded=True):
                 c1, c2 = st.columns([1, 4])
-                c1.image(f, width=150)
+
+                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(f.getbuffer())
+                    original_path = tmp.name
+                    temp_paths.append(original_path)
+
+                jpg_path = convert_to_jpg(original_path)
+                temp_paths.append(jpg_path)
+
+                c1.image(jpg_path, width=150)
 
                 ko_input = c2.text_input(
                     "한국어 문구",
@@ -284,12 +312,7 @@ def main():
                     key=f"ko_{idx}"
                 )
 
-                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(f.getbuffer())
-                    temp_paths.append(tmp.name)
-                    slide_inputs.append(SlideData(tmp.name, ko_input, "", "", ""))
+                slide_inputs.append(SlideData(jpg_path, ko_input, "", "", ""))
 
         if st.button("PPT 생성"):
             try:
@@ -326,7 +349,10 @@ def main():
             finally:
                 for p in temp_paths:
                     if os.path.exists(p):
-                        os.remove(p)
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
 
 
 if __name__ == "__main__":
