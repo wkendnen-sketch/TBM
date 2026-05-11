@@ -273,43 +273,45 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
-hide_streamlit_style = """
-<style>
-#MainMenu {
-    visibility: hidden;
-}
 
-header {
-    visibility: hidden;
-}
+    hide_streamlit_style = """
+    <style>
+    #MainMenu {
+        visibility: hidden;
+    }
 
-footer {
-    visibility: hidden;
-}
+    header {
+        visibility: hidden;
+    }
 
-.stDeployButton {
-    display: none;
-}
+    footer {
+        visibility: hidden;
+    }
 
-[data-testid="stToolbar"] {
-    display: none;
-}
+    .stDeployButton {
+        display: none;
+    }
 
-[data-testid="stDecoration"] {
-    display: none;
-}
+    [data-testid="stToolbar"] {
+        display: none;
+    }
 
-[data-testid="stStatusWidget"] {
-    display: none;
-}
+    [data-testid="stDecoration"] {
+        display: none;
+    }
 
-[data-testid="manage-app-button"] {
-    display: none;
-}
-</style>
-"""
+    [data-testid="stStatusWidget"] {
+        display: none;
+    }
 
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+    [data-testid="manage-app-button"] {
+        display: none;
+    }
+    </style>
+    """
+
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
     st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
 
     if "GPT_API_KEY" not in st.secrets:
