@@ -33,6 +33,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 DAILY_TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template2.pptx")
+TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_upload")
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
@@ -54,6 +55,10 @@ DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
 TIME_BOX_TEXT = "TIME_BOX_1"
 
 HOLD_POINT_TEXT = "HOLD POINT"
+
+TEMP_UPLOAD_LIMIT_MB = 100
+TEMP_UPLOAD_LIMIT_BYTES = TEMP_UPLOAD_LIMIT_MB * 1024 * 1024
+TEMP_UPLOAD_EXPIRE_SECONDS = 24 * 60 * 60
 
 NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
 
@@ -121,11 +126,206 @@ def hide_streamlit_ui():
         [data-testid="stToolbar"] {display: none;}
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stStatusWidget"] {display: none;}
-        [data-testid="manage-app-button"] {display: none;}
+
+        .block-container {
+            padding-top: 1.2rem !important;
+        }
         </style>
         """,
         unsafe_allow_html=True
     )
+
+
+def render_app_title():
+    st.markdown(
+        f"""
+        <div style="margin-top:-30px; margin-bottom:8px;">
+            <h2 style="
+                font-size:24px;
+                font-weight:700;
+                margin:0;
+                padding:0;
+                line-height:1.2;
+            ">
+                🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]
+            </h2>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def safe_filename(filename: str) -> str:
+    name = os.path.basename(filename)
+    name = re.sub(r"[^a-zA-Z0-9가-힣._ -]", "_", name)
+    return name[:120]
+
+
+def format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    return f"{size_bytes / 1024 / 1024:.1f}MB"
+
+
+def ensure_temp_upload_dir():
+    os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+
+
+def cleanup_old_temp_files():
+    ensure_temp_upload_dir()
+    now = time.time()
+
+    for name in os.listdir(TEMP_UPLOAD_DIR):
+        path = os.path.join(TEMP_UPLOAD_DIR, name)
+        if os.path.isfile(path):
+            if now - os.path.getmtime(path) > TEMP_UPLOAD_EXPIRE_SECONDS:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+
+def get_temp_upload_size() -> int:
+    ensure_temp_upload_dir()
+    total = 0
+
+    for name in os.listdir(TEMP_UPLOAD_DIR):
+        path = os.path.join(TEMP_UPLOAD_DIR, name)
+        if os.path.isfile(path):
+            total += os.path.getsize(path)
+
+    return total
+
+
+def save_temp_upload_file(uploaded_file):
+    ensure_temp_upload_dir()
+
+    current_size = get_temp_upload_size()
+    file_bytes = uploaded_file.getvalue()
+    file_size = len(file_bytes)
+
+    if current_size + file_size > TEMP_UPLOAD_LIMIT_BYTES:
+        raise ValueError(
+            f"임시업로드 용량 초과: 현재 {format_size(current_size)} / "
+            f"추가 {format_size(file_size)} / 최대 {TEMP_UPLOAD_LIMIT_MB}MB"
+        )
+
+    filename = safe_filename(uploaded_file.name)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_name = f"{timestamp}_{filename}"
+    save_path = os.path.join(TEMP_UPLOAD_DIR, save_name)
+
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
+
+    return save_path
+
+
+def make_thumbnail_bytes(path: str, max_size: int = 180):
+    try:
+        img = Image.open(path)
+
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        img.thumbnail((max_size, max_size))
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        return buf
+
+    except Exception:
+        return None
+
+
+def delete_file(path: str):
+    try:
+        if os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def render_temp_upload():
+    cleanup_old_temp_files()
+
+    st.markdown("#### 임시업로드")
+
+    used = get_temp_upload_size()
+    st.caption(f"용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB")
+
+    upload_files = st.file_uploader(
+        "임시업로드",
+        accept_multiple_files=True,
+        type=["jpg", "jpeg", "png", "webp", "heic", "heif", "mpo", "pdf", "pptx", "xlsx", "docx", "txt"],
+        key="daily_temp_upload_uploader"
+    )
+
+    if upload_files:
+        uploaded_count = 0
+
+        for file in upload_files:
+            try:
+                save_temp_upload_file(file)
+                uploaded_count += 1
+            except Exception as e:
+                st.error(str(e))
+
+        if uploaded_count > 0:
+            st.success(f"{uploaded_count}개 등록 완료")
+            st.rerun()
+
+    files = []
+    ensure_temp_upload_dir()
+
+    for name in sorted(os.listdir(TEMP_UPLOAD_DIR), reverse=True):
+        path = os.path.join(TEMP_UPLOAD_DIR, name)
+        if os.path.isfile(path):
+            files.append((name, path, os.path.getsize(path)))
+
+    if files:
+        for idx, (name, path, size) in enumerate(files, start=1):
+            col1, col2, col3 = st.columns([1, 3, 0.5])
+
+            thumb = make_thumbnail_bytes(path)
+
+            with col1:
+                if thumb:
+                    st.image(thumb, width=110)
+                else:
+                    st.write("파일")
+
+            with col2:
+                st.caption(name)
+                st.caption(format_size(size))
+
+                with open(path, "rb") as f:
+                    st.download_button(
+                        label="다운로드",
+                        data=f,
+                        file_name=name,
+                        use_container_width=True,
+                        key=f"temp_download_{name}_{idx}"
+                    )
+
+            with col3:
+                if st.button("X", key=f"temp_delete_{name}_{idx}", use_container_width=True):
+                    if delete_file(path):
+                        st.rerun()
+                    else:
+                        st.error("삭제 실패")
+    else:
+        st.info("임시업로드 파일 없음.")
 
 
 def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
@@ -537,7 +737,7 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 
 def build_daily_ppt(
-    original_items: List[DailySlideData],
+    bad_items: List[DailySlideData],
     material_paths: List[str]
 ) -> io.BytesIO:
     if not os.path.exists(DAILY_TEMPLATE_PPT):
@@ -566,7 +766,7 @@ def build_daily_ppt(
 
     start_slide_index = 3
 
-    for i, item in enumerate(original_items):
+    for i, item in enumerate(bad_items):
         target_index = start_slide_index + i
 
         if target_index >= len(prs.slides):
@@ -574,7 +774,7 @@ def build_daily_ppt(
 
         fill_daily_slide(prs.slides[target_index], item, strict=False)
 
-    keep_slide_count = max(3, start_slide_index + len(original_items))
+    keep_slide_count = max(3, start_slide_index + len(bad_items))
 
     material_base_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
     if material_base_idx is not None and material_paths:
@@ -678,11 +878,11 @@ def render_tbm_input_area():
 def render_daily_safety_meeting():
     st.markdown("## 일일안전회의")
 
-    original_files = st.file_uploader(
-        "원본사진",
+    bad_files = st.file_uploader(
+        "부적합사진",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
-        key="daily_original_uploader"
+        key="daily_bad_uploader"
     )
 
     material_files = st.file_uploader(
@@ -692,14 +892,18 @@ def render_daily_safety_meeting():
         key="daily_material_uploader"
     )
 
-    original_items = []
+    st.markdown("---")
+    render_temp_upload()
+    st.markdown("---")
+
+    bad_items = []
     material_paths = []
     temp_paths = []
 
-    if original_files:
-        st.markdown("#### 원본사진")
+    if bad_files:
+        st.markdown("#### 부적합사진")
 
-        for idx, f in enumerate(original_files):
+        for idx, f in enumerate(bad_files):
             suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
 
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -710,7 +914,7 @@ def render_daily_safety_meeting():
             jpg_path = convert_to_jpg(original_path)
             temp_paths.append(jpg_path)
 
-            with st.expander(f"원본사진 #{idx + 1}", expanded=True):
+            with st.expander(f"부적합사진 #{idx + 1}", expanded=True):
                 c1, c2 = st.columns([1, 4])
 
                 with c1:
@@ -721,10 +925,10 @@ def render_daily_safety_meeting():
                         "문구 입력",
                         value="",
                         placeholder="예: 자재 반입 확인",
-                        key=f"daily_original_text_{idx}"
+                        key=f"daily_bad_text_{idx}"
                     )
 
-            original_items.append(DailySlideData(jpg_path, text_value))
+            bad_items.append(DailySlideData(jpg_path, text_value))
 
     if material_files:
         st.markdown("#### 자재입고현황")
@@ -748,11 +952,11 @@ def render_daily_safety_meeting():
                 st.caption(f"{idx + 1}번 자재입고현황")
                 st.caption(f.name)
 
-    if original_files or material_files:
+    if bad_files or material_files:
         if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
             try:
                 with st.spinner("PPT 생성 중..."):
-                    ppt = build_daily_ppt(original_items, material_paths)
+                    ppt = build_daily_ppt(bad_items, material_paths)
 
                 st.success("완료!")
                 st.download_button(
@@ -781,7 +985,7 @@ def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     hide_streamlit_ui()
 
-    st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+    render_app_title()
 
     render_daily_safety_meeting()
 
