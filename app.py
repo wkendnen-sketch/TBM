@@ -55,6 +55,7 @@ PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
 
 NAVER_WEATHER_URL = "https://weather.naver.com/"
 
+# 오산시 양산동 좌표
 OSAN_YANGSAN_LAT = 37.196790422777
 OSAN_YANGSAN_LON = 127.02460549856
 
@@ -563,9 +564,29 @@ def capture_naver_weather_region():
             permissions=["geolocation"],
         )
 
+        try:
+            context.grant_permissions(
+                ["geolocation"],
+                origin="https://weather.naver.com"
+            )
+        except Exception:
+            pass
+
         page = context.new_page()
-        page.goto(NAVER_WEATHER_URL, wait_until="networkidle", timeout=60000)
-        page.wait_for_timeout(2500)
+
+        page.goto(
+            NAVER_WEATHER_URL,
+            wait_until="networkidle",
+            timeout=60000
+        )
+
+        page.wait_for_timeout(3000)
+
+        try:
+            page.get_by_text("현재 위치").click(timeout=3000)
+            page.wait_for_timeout(3000)
+        except Exception:
+            pass
 
         page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_1['scroll_y']})")
         page.wait_for_timeout(1000)
