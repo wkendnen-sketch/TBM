@@ -66,9 +66,9 @@ BROWSER_VIEWPORT = {
 WEATHER_CAPTURE_1 = {
     "scroll_y": 0,
     "clip": {
-        "x": 0,
+        "x": 768,
         "y": 200,
-        "width": 810,
+        "width": 768,
         "height": 428,
     }
 }
@@ -76,9 +76,9 @@ WEATHER_CAPTURE_1 = {
 WEATHER_CAPTURE_2 = {
     "scroll_y": 300,
     "clip": {
-        "x": 56,
+        "x": 768,
         "y": 399,
-        "width": 750,
+        "width": 768,
         "height": 290,
     }
 }
