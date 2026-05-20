@@ -78,9 +78,9 @@ WEATHER_CAPTURE_2 = {
     "scroll_y": 300,
     "clip": {
         "x": 0,
-        "y": 360,
-        "width": 900,
-        "height": 400,
+        "y": 399,
+        "width": 806,
+        "height": 312,
     }
 }
 
