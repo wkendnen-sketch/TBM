@@ -51,6 +51,7 @@ WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
 
 DAILY_PHOTO_BOX_TEXT = "PHOTO_BOX_1"
 DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
+TIME_BOX_TEXT = "TIME_BOX_1"
 
 HOLD_POINT_TEXT = "HOLD POINT"
 
@@ -66,7 +67,7 @@ WEATHER_CAPTURE_1 = {
     "clip": {
         "x": 350,
         "y": 200,
-        "width": 800,
+        "width": 780,
         "height": 428,
     }
 }
@@ -76,7 +77,7 @@ WEATHER_CAPTURE_2 = {
     "clip": {
         "x": 350,
         "y": 399,
-        "width": 800,
+        "width": 780,
         "height": 290,
     }
 }
@@ -294,6 +295,13 @@ def find_text_target(slide, target_text: str):
     return None
 
 
+def find_slide_index_by_text(prs, target_text: str):
+    for idx, slide in enumerate(prs.slides):
+        if slide_has_text(slide, target_text):
+            return idx
+    return None
+
+
 def set_target_text(
     target_obj,
     text: str,
@@ -328,6 +336,20 @@ def add_picture_to_shape(slide, image_path, target_shape):
         width=target_shape.width,
         height=target_shape.height
     )
+
+
+def duplicate_slide(prs, source_slide):
+    source = source_slide._element
+    blank_slide_layout = prs.slide_layouts[6]
+    new_slide = prs.slides.add_slide(blank_slide_layout)
+
+    for shape in source:
+        new_slide._element.insert_element_before(
+            shape.__copy__(),
+            "p:extLst"
+        )
+
+    return new_slide
 
 
 def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
@@ -403,6 +425,30 @@ def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
         return
 
     add_picture_to_shape(slide, image_path, obj)
+
+
+def fill_material_slides(prs, material_paths: List[str]):
+    if not material_paths:
+        return
+
+    base_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
+
+    if base_idx is None:
+        return
+
+    base_slide = prs.slides[base_idx]
+
+    for i, image_path in enumerate(material_paths):
+        if i == 0:
+            target_slide = base_slide
+        else:
+            target_slide = duplicate_slide(prs, base_slide)
+
+        insert_image_to_placeholder(
+            target_slide,
+            TIME_BOX_TEXT,
+            image_path
+        )
 
 
 def fill_date_box(slide):
@@ -516,6 +562,8 @@ def build_daily_ppt(
     except Exception as e:
         raise ValueError(f"날씨 캡쳐 실패: {e}")
 
+    fill_material_slides(prs, material_paths)
+
     start_slide_index = 3
 
     for i, item in enumerate(original_items):
@@ -527,6 +575,10 @@ def build_daily_ppt(
         fill_daily_slide(prs.slides[target_index], item, strict=False)
 
     keep_slide_count = max(3, start_slide_index + len(original_items))
+
+    material_base_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
+    if material_base_idx is not None and material_paths:
+        keep_slide_count = max(keep_slide_count, material_base_idx + len(material_paths))
 
     delete_extra_slides(prs, keep_slide_count)
 
