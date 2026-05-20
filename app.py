@@ -48,15 +48,13 @@ MY_BOX_TEXT = "4"
 DATE_BOX_TEXT = "DATE_BOX"
 WEATHER_BOX_1_TEXT = "WEATHER_BOX_1"
 WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
+HOLD_POINT_TEXT = "HOLD POINT"
 
 PUBLIC_DRIVE_LIMIT_MB = 100
 PUBLIC_DRIVE_LIMIT_BYTES = PUBLIC_DRIVE_LIMIT_MB * 1024 * 1024
 PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
 
 NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
-
-OSAN_YANGSAN_LAT = 37.196790422777
-OSAN_YANGSAN_LON = 127.02460549856
 
 BROWSER_VIEWPORT = {
     "width": 1920,
@@ -68,7 +66,7 @@ WEATHER_CAPTURE_1 = {
     "clip": {
         "x": 350,
         "y": 200,
-        "width": 780,
+        "width": 880,
         "height": 428,
     }
 }
@@ -78,7 +76,7 @@ WEATHER_CAPTURE_2 = {
     "clip": {
         "x": 350,
         "y": 399,
-        "width": 780,
+        "width": 880,
         "height": 290,
     }
 }
@@ -87,10 +85,10 @@ WEATHER_CAPTURE_2 = {
 @dataclass
 class SlideData:
     image_path: str
-    ko: str
-    zh: str
-    vi: str
-    my: str
+    ko: str = ""
+    zh: str = ""
+    vi: str = ""
+    my: str = ""
 
 
 def install_playwright_browser():
@@ -435,6 +433,25 @@ def normalize_text(text: str) -> str:
     return str(text).strip().replace("\n", "").replace("\r", "")
 
 
+def slide_has_text(slide, target_text: str) -> bool:
+    target = normalize_text(target_text)
+
+    for shape in iter_all_shapes(slide.shapes):
+        if has_text(shape):
+            if target in normalize_text(shape.text):
+                return True
+
+    for shape in iter_all_shapes(slide.shapes):
+        if hasattr(shape, "has_table") and shape.has_table:
+            table = shape.table
+            for row in table.rows:
+                for cell in row.cells:
+                    if target in normalize_text(cell.text):
+                        return True
+
+    return False
+
+
 def find_text_target(slide, target_text: str):
     target = normalize_text(target_text)
 
@@ -571,20 +588,7 @@ def capture_naver_weather_region():
             viewport=BROWSER_VIEWPORT,
             locale="ko-KR",
             device_scale_factor=2,
-            geolocation={
-                "latitude": OSAN_YANGSAN_LAT,
-                "longitude": OSAN_YANGSAN_LON,
-            },
-            permissions=["geolocation"],
         )
-
-        try:
-            context.grant_permissions(
-                ["geolocation"],
-                origin="https://weather.naver.com"
-            )
-        except Exception:
-            pass
 
         page = context.new_page()
 
@@ -595,12 +599,6 @@ def capture_naver_weather_region():
         )
 
         page.wait_for_timeout(3000)
-
-        try:
-            page.get_by_text("현재 위치").click(timeout=3000)
-            page.wait_for_timeout(3000)
-        except Exception:
-            pass
 
         page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_1['scroll_y']})")
         page.wait_for_timeout(1000)
@@ -670,6 +668,11 @@ def build_ppt_from_template(
         keep_slide_count = max(keep_slide_count, 3)
 
     for idx in range(len(prs.slides) - 1, keep_slide_count - 1, -1):
+        slide = prs.slides[idx]
+
+        if slide_has_text(slide, HOLD_POINT_TEXT):
+            continue
+
         slide_id = prs.slides._sldIdLst[idx]
         prs.part.drop_rel(slide_id.rId)
         del prs.slides._sldIdLst[idx]
@@ -704,20 +707,12 @@ def build_daily_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     )
 
 
-def render_slide_input_area(
-    uploader_label: str,
-    button_label: str,
-    output_name: str,
-    build_func,
-    uploader_key: str,
-    button_key: str,
-    download_key: str
-):
+def render_tbm_input_area():
     files = st.file_uploader(
-        uploader_label,
+        "사진 업로드",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
-        key=uploader_key
+        key="main_tbm_uploader"
     )
 
     if files:
@@ -744,12 +739,12 @@ def render_slide_input_area(
                     "한국어 문구",
                     value="",
                     placeholder="예: 지정된 이동통로 통행",
-                    key=f"{uploader_key}_ko_{idx}"
+                    key=f"main_tbm_ko_{idx}"
                 )
 
                 slide_inputs.append(SlideData(jpg_path, ko_input, "", "", ""))
 
-        if st.button(button_label, key=button_key):
+        if st.button("PPT 생성", key="main_create_btn"):
             try:
                 with st.spinner("번역 중..."):
                     ko_list = [s.ko for s in slide_inputs]
@@ -768,15 +763,15 @@ def render_slide_input_area(
                         s.my = tr["my"]
 
                 with st.spinner("PPT 생성 중..."):
-                    ppt = build_func(slide_inputs)
+                    ppt = build_ppt(slide_inputs)
 
                 st.success("완료!")
                 st.download_button(
                     "PPT 다운로드",
                     ppt,
-                    file_name=output_name,
+                    file_name=OUTPUT_PPT_NAME,
                     mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    key=download_key
+                    key="main_download_btn"
                 )
 
             except Exception as e:
@@ -793,15 +788,63 @@ def render_slide_input_area(
 
 def render_daily_safety_meeting():
     with st.expander("일일안전회의", expanded=False):
-        render_slide_input_area(
-            uploader_label="사진 업로드",
-            button_label="일일안전회의 PPT 생성",
-            output_name=DAILY_OUTPUT_PPT_NAME,
-            build_func=build_daily_ppt,
-            uploader_key="daily_meeting_uploader",
-            button_key="daily_create_btn",
-            download_key="daily_download_btn"
+        files = st.file_uploader(
+            "사진 업로드",
+            accept_multiple_files=True,
+            type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+            key="daily_meeting_uploader"
         )
+
+        if files:
+            slide_inputs = []
+            temp_paths = []
+
+            st.markdown("#### 등록 사진")
+
+            for idx, f in enumerate(files):
+                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(f.getbuffer())
+                    original_path = tmp.name
+                    temp_paths.append(original_path)
+
+                jpg_path = convert_to_jpg(original_path)
+                temp_paths.append(jpg_path)
+
+                col1, col2 = st.columns([1, 3])
+                with col1:
+                    st.image(jpg_path, width=120)
+                with col2:
+                    st.caption(f"{idx + 1}번 사진")
+                    st.caption(f.name)
+
+                slide_inputs.append(SlideData(jpg_path))
+
+            if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
+                try:
+                    with st.spinner("PPT 생성 중..."):
+                        ppt = build_daily_ppt(slide_inputs)
+
+                    st.success("완료!")
+                    st.download_button(
+                        "일일안전회의 PPT 다운로드",
+                        ppt,
+                        file_name=DAILY_OUTPUT_PPT_NAME,
+                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                        key="daily_download_btn"
+                    )
+
+                except Exception as e:
+                    st.error(f"오류 발생: {e}")
+
+                finally:
+                    for p in temp_paths:
+                        if os.path.exists(p):
+                            try:
+                                os.remove(p)
+                            except Exception:
+                                pass
 
 
 def main():
@@ -821,15 +864,7 @@ def main():
         st.warning("Secrets에 GPT_API_KEY 설정 필요")
         st.stop()
 
-    render_slide_input_area(
-        uploader_label="사진 업로드",
-        button_label="PPT 생성",
-        output_name=OUTPUT_PPT_NAME,
-        build_func=build_ppt,
-        uploader_key="main_tbm_uploader",
-        button_key="main_create_btn",
-        download_key="main_download_btn"
-    )
+    render_tbm_input_area()
 
 
 if __name__ == "__main__":
