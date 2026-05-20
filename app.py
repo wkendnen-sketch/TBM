@@ -385,8 +385,11 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
                     text += c.get("text", "")
 
     text = text.replace("```json", "").replace("```", "").strip()
+try:
     parsed = json.loads(text)
-
+except Exception:
+    text = text.replace("\n", "\\n").replace("\r", "")
+    parsed = json.loads(text)
     if not isinstance(parsed, list):
         raise ValueError("GPT 응답이 배열이 아닙니다.")
 
