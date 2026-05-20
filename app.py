@@ -70,7 +70,7 @@ WEATHER_CAPTURE_1 = {
         "x": 0,
         "y": 200,
         "width": 810,
-        "height": 475,
+        "height": 428,
     }
 }
 
