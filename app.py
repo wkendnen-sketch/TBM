@@ -75,7 +75,7 @@ WEATHER_CAPTURE_1 = {
 }
 
 WEATHER_CAPTURE_2 = {
-    "scroll_y": 900,
+    "scroll_y": 300,
     "clip": {
         "x": 0,
         "y": 100,
