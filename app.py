@@ -68,7 +68,7 @@ WEATHER_CAPTURE_1 = {
     "clip": {
         "x": 350,
         "y": 200,
-        "width": 800,
+        "width": 780,
         "height": 428,
     }
 }
@@ -78,7 +78,7 @@ WEATHER_CAPTURE_2 = {
     "clip": {
         "x": 350,
         "y": 399,
-        "width": 800,
+        "width": 780,
         "height": 290,
     }
 }
