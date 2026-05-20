@@ -6,6 +6,7 @@ import time
 import tempfile
 from dataclasses import dataclass
 from typing import List
+from datetime import datetime
 
 import requests
 import streamlit as st
@@ -20,13 +21,22 @@ try:
 except Exception:
     pass
 
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
+DAILY_TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template2.pptx")
+
 PUBLIC_DRIVE_DIR = os.path.join(BASE_DIR, "public_drive")
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
+DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
 APP_VERSION = "26년 5월 버전"
 
 PHOTO_BOX_TEXT = "PHOTO_BOX"
@@ -34,10 +44,44 @@ KO_BOX_TEXT = "1"
 ZH_BOX_TEXT = "2"
 VI_BOX_TEXT = "3"
 MY_BOX_TEXT = "4"
+DATE_BOX_TEXT = "DATE_BOX"
+WEATHER_BOX_1_TEXT = "WEATHER_BOX_1"
+WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
 
 PUBLIC_DRIVE_LIMIT_MB = 100
 PUBLIC_DRIVE_LIMIT_BYTES = PUBLIC_DRIVE_LIMIT_MB * 1024 * 1024
 PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
+
+NAVER_WEATHER_URL = "https://weather.naver.com/"
+
+OSAN_YANGSAN_LAT = 37.196790422777
+OSAN_YANGSAN_LON = 127.02460549856
+
+BROWSER_VIEWPORT = {
+    "width": 1280,
+    "height": 1600,
+}
+
+# 여기 좌표는 직접 수정하면 됨
+WEATHER_CAPTURE_1 = {
+    "scroll_y": 0,
+    "clip": {
+        "x": 0,
+        "y": 120,
+        "width": 1280,
+        "height": 550,
+    }
+}
+
+WEATHER_CAPTURE_2 = {
+    "scroll_y": 900,
+    "clip": {
+        "x": 0,
+        "y": 100,
+        "width": 1280,
+        "height": 650,
+    }
+}
 
 
 @dataclass
@@ -270,7 +314,7 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
         img.save(
             output_path,
             format="JPEG",
-            quality=quality,
+            quality=88,
             optimize=True
         )
 
@@ -278,6 +322,12 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
 
     except Exception as e:
         raise ValueError(f"이미지 변환 실패: {e}")
+
+
+def get_korean_date_text():
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    now = datetime.now()
+    return f"{now.year}년 {now.month:02d}월 {now.day:02d}일 {weekdays[now.weekday()]}"
 
 
 def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
@@ -387,7 +437,7 @@ def find_text_target(slide, target_text: str):
     return None
 
 
-def set_target_text(target_obj, text: str, size_pt: int):
+def set_target_text(target_obj, text: str, size_pt: int, font_name: str = None):
     kind, obj = target_obj
 
     tf = obj.text_frame
@@ -397,8 +447,11 @@ def set_target_text(target_obj, text: str, size_pt: int):
     run.text = text
     run.font.size = Pt(size_pt)
 
+    if font_name:
+        run.font.name = font_name
 
-def add_picture_cover(slide, image_path, target_shape):
+
+def add_picture_to_shape(slide, image_path, target_shape):
     slide.shapes.add_picture(
         image_path,
         target_shape.left,
@@ -433,7 +486,7 @@ def fill_slide_by_placeholders(slide, item: SlideData):
     if photo_kind != "shape":
         raise ValueError("PHOTO_BOX는 텍스트 상자/도형이어야 합니다.")
 
-    add_picture_cover(slide, item.image_path, photo_obj)
+    add_picture_to_shape(slide, item.image_path, photo_obj)
 
     set_target_text(ko_target, item.ko, BASE_FONT_SIZE_PT)
     set_target_text(zh_target, item.zh, BASE_FONT_SIZE_PT)
@@ -441,19 +494,120 @@ def fill_slide_by_placeholders(slide, item: SlideData):
     set_target_text(my_target, item.my, BASE_FONT_SIZE_PT)
 
 
-def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
-    if not os.path.exists(TEMPLATE_PPT):
-        raise FileNotFoundError(f"템플릿 파일이 없습니다: {TEMPLATE_PPT}")
+def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
+    target = find_text_target(slide, placeholder_text)
 
-    prs = Presentation(TEMPLATE_PPT)
+    if target is None:
+        raise ValueError(f"{placeholder_text} 플레이스홀더를 찾지 못했습니다.")
+
+    kind, obj = target
+
+    if kind != "shape":
+        raise ValueError(f"{placeholder_text}는 도형/텍스트박스여야 합니다.")
+
+    add_picture_to_shape(slide, image_path, obj)
+
+
+def fill_date_box(slide):
+    target = find_text_target(slide, DATE_BOX_TEXT)
+
+    if target:
+        set_target_text(
+            target,
+            get_korean_date_text(),
+            30,
+            font_name="맑은 고딕"
+        )
+
+
+def capture_naver_weather_region():
+    if sync_playwright is None:
+        raise ValueError("playwright가 설치되지 않았습니다.")
+
+    weather_1 = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+    weather_2 = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+
+        context = browser.new_context(
+            viewport=BROWSER_VIEWPORT,
+            locale="ko-KR",
+            geolocation={
+                "latitude": OSAN_YANGSAN_LAT,
+                "longitude": OSAN_YANGSAN_LON,
+            },
+            permissions=["geolocation"],
+        )
+
+        page = context.new_page()
+        page.goto(NAVER_WEATHER_URL, wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(2500)
+
+        page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_1['scroll_y']})")
+        page.wait_for_timeout(1000)
+        page.screenshot(
+            path=weather_1,
+            clip=WEATHER_CAPTURE_1["clip"]
+        )
+
+        page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_2['scroll_y']})")
+        page.wait_for_timeout(1000)
+        page.screenshot(
+            path=weather_2,
+            clip=WEATHER_CAPTURE_2["clip"]
+        )
+
+        browser.close()
+
+    return weather_1, weather_2
+
+
+def build_ppt_from_template(
+    slide_data_list: List[SlideData],
+    template_path: str,
+    include_daily_options: bool = False
+) -> io.BytesIO:
+    if not os.path.exists(template_path):
+        raise FileNotFoundError(f"템플릿 파일이 없습니다: {template_path}")
+
+    prs = Presentation(template_path)
+    temp_extra_paths = []
+
+    if include_daily_options:
+        if len(prs.slides) >= 1:
+            fill_date_box(prs.slides[0])
+
+        try:
+            weather_1, weather_2 = capture_naver_weather_region()
+            temp_extra_paths.extend([weather_1, weather_2])
+
+            if len(prs.slides) >= 2:
+                insert_image_to_placeholder(prs.slides[1], WEATHER_BOX_1_TEXT, weather_1)
+
+            if len(prs.slides) >= 3:
+                insert_image_to_placeholder(prs.slides[2], WEATHER_BOX_2_TEXT, weather_2)
+
+        except Exception as e:
+            raise ValueError(f"날씨 캡쳐 실패: {e}")
+
+    start_slide_index = 3 if include_daily_options else 0
 
     for i, item in enumerate(slide_data_list):
-        if i >= len(prs.slides):
+        target_index = start_slide_index + i
+
+        if target_index >= len(prs.slides):
             break
-        slide = prs.slides[i]
+
+        slide = prs.slides[target_index]
         fill_slide_by_placeholders(slide, item)
 
-    for idx in range(len(prs.slides) - 1, len(slide_data_list) - 1, -1):
+    keep_slide_count = start_slide_index + len(slide_data_list)
+
+    if include_daily_options:
+        keep_slide_count = max(keep_slide_count, 3)
+
+    for idx in range(len(prs.slides) - 1, keep_slide_count - 1, -1):
         slide_id = prs.slides._sldIdLst[idx]
         prs.part.drop_rel(slide_id.rId)
         del prs.slides._sldIdLst[idx]
@@ -461,27 +615,47 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     out = io.BytesIO()
     prs.save(out)
     out.seek(0)
+
+    for p in temp_extra_paths:
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
     return out
 
 
-def main():
-    st.set_page_config(page_title="TBM PPT Maker", layout="wide")
-    hide_streamlit_ui()
+def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
+    return build_ppt_from_template(
+        slide_data_list,
+        TEMPLATE_PPT,
+        include_daily_options=False
+    )
 
-    top_left, top_right = st.columns([3, 1])
-    with top_left:
-        st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
-    with top_right:
-        render_public_drive()
 
-    if "GPT_API_KEY" not in st.secrets:
-        st.warning("Secrets에 GPT_API_KEY 설정 필요")
-        st.stop()
+def build_daily_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
+    return build_ppt_from_template(
+        slide_data_list,
+        DAILY_TEMPLATE_PPT,
+        include_daily_options=True
+    )
 
+
+def render_slide_input_area(
+    uploader_label: str,
+    button_label: str,
+    output_name: str,
+    build_func,
+    uploader_key: str,
+    button_key: str,
+    download_key: str
+):
     files = st.file_uploader(
-        "사진 업로드",
+        uploader_label,
         accept_multiple_files=True,
-        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"]
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+        key=uploader_key
     )
 
     if files:
@@ -508,12 +682,12 @@ def main():
                     "한국어 문구",
                     value="",
                     placeholder="예: 지정된 이동통로 통행",
-                    key=f"ko_{idx}"
+                    key=f"{uploader_key}_ko_{idx}"
                 )
 
                 slide_inputs.append(SlideData(jpg_path, ko_input, "", "", ""))
 
-        if st.button("PPT 생성"):
+        if st.button(button_label, key=button_key):
             try:
                 with st.spinner("번역 중..."):
                     ko_list = [s.ko for s in slide_inputs]
@@ -532,14 +706,15 @@ def main():
                         s.my = tr["my"]
 
                 with st.spinner("PPT 생성 중..."):
-                    ppt = build_ppt(slide_inputs)
+                    ppt = build_func(slide_inputs)
 
                 st.success("완료!")
                 st.download_button(
                     "PPT 다운로드",
                     ppt,
-                    file_name=OUTPUT_PPT_NAME,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    file_name=output_name,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key=download_key
                 )
 
             except Exception as e:
@@ -552,6 +727,45 @@ def main():
                             os.remove(p)
                         except Exception:
                             pass
+
+
+def render_daily_safety_meeting():
+    with st.expander("일일안전회의", expanded=False):
+        render_slide_input_area(
+            uploader_label="사진 업로드",
+            button_label="일일안전회의 PPT 생성",
+            output_name=DAILY_OUTPUT_PPT_NAME,
+            build_func=build_daily_ppt,
+            uploader_key="daily_meeting_uploader",
+            button_key="daily_create_btn",
+            download_key="daily_download_btn"
+        )
+
+
+def main():
+    st.set_page_config(page_title="TBM PPT Maker", layout="wide")
+    hide_streamlit_ui()
+
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+    with top_right:
+        render_public_drive()
+        render_daily_safety_meeting()
+
+    if "GPT_API_KEY" not in st.secrets:
+        st.warning("Secrets에 GPT_API_KEY 설정 필요")
+        st.stop()
+
+    render_slide_input_area(
+        uploader_label="사진 업로드",
+        button_label="PPT 생성",
+        output_name=OUTPUT_PPT_NAME,
+        build_func=build_ppt,
+        uploader_key="main_tbm_uploader",
+        button_key="main_create_btn",
+        download_key="main_download_btn"
+    )
 
 
 if __name__ == "__main__":
