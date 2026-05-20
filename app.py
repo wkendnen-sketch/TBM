@@ -33,7 +33,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 DAILY_TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template2.pptx")
-PUBLIC_DRIVE_DIR = os.path.join(BASE_DIR, "public_drive")
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
@@ -45,14 +44,15 @@ KO_BOX_TEXT = "1"
 ZH_BOX_TEXT = "2"
 VI_BOX_TEXT = "3"
 MY_BOX_TEXT = "4"
+
 DATE_BOX_TEXT = "DATE_BOX"
 WEATHER_BOX_1_TEXT = "WEATHER_BOX_1"
 WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
-HOLD_POINT_TEXT = "HOLD POINT"
 
-PUBLIC_DRIVE_LIMIT_MB = 100
-PUBLIC_DRIVE_LIMIT_BYTES = PUBLIC_DRIVE_LIMIT_MB * 1024 * 1024
-PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
+DAILY_PHOTO_BOX_TEXT = "PHOTO_BOX_1"
+DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
+
+HOLD_POINT_TEXT = "HOLD POINT"
 
 NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
 
@@ -66,7 +66,7 @@ WEATHER_CAPTURE_1 = {
     "clip": {
         "x": 350,
         "y": 200,
-        "width": 880,
+        "width": 800,
         "height": 428,
     }
 }
@@ -76,7 +76,7 @@ WEATHER_CAPTURE_2 = {
     "clip": {
         "x": 350,
         "y": 399,
-        "width": 880,
+        "width": 800,
         "height": 290,
     }
 }
@@ -89,6 +89,12 @@ class SlideData:
     zh: str = ""
     vi: str = ""
     my: str = ""
+
+
+@dataclass
+class DailySlideData:
+    image_path: str
+    text: str = ""
 
 
 def install_playwright_browser():
@@ -121,181 +127,6 @@ def hide_streamlit_ui():
     )
 
 
-def safe_filename(filename: str) -> str:
-    name = os.path.basename(filename)
-    name = re.sub(r"[^a-zA-Z0-9가-힣._ -]", "_", name)
-    return name[:120]
-
-
-def format_size(size_bytes: int) -> str:
-    if size_bytes < 1024:
-        return f"{size_bytes}B"
-    if size_bytes < 1024 * 1024:
-        return f"{size_bytes / 1024:.1f}KB"
-    return f"{size_bytes / 1024 / 1024:.1f}MB"
-
-
-def ensure_public_drive():
-    os.makedirs(PUBLIC_DRIVE_DIR, exist_ok=True)
-
-
-def cleanup_old_drive_files():
-    ensure_public_drive()
-    now = time.time()
-
-    for name in os.listdir(PUBLIC_DRIVE_DIR):
-        path = os.path.join(PUBLIC_DRIVE_DIR, name)
-        if os.path.isfile(path):
-            if now - os.path.getmtime(path) > PUBLIC_DRIVE_EXPIRE_SECONDS:
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
-
-
-def get_drive_size() -> int:
-    ensure_public_drive()
-    total = 0
-
-    for name in os.listdir(PUBLIC_DRIVE_DIR):
-        path = os.path.join(PUBLIC_DRIVE_DIR, name)
-        if os.path.isfile(path):
-            total += os.path.getsize(path)
-
-    return total
-
-
-def save_drive_file(uploaded_file):
-    ensure_public_drive()
-
-    current_size = get_drive_size()
-    file_bytes = uploaded_file.getvalue()
-    file_size = len(file_bytes)
-
-    if current_size + file_size > PUBLIC_DRIVE_LIMIT_BYTES:
-        raise ValueError(
-            f"부적합 사진 용량 초과: 현재 {format_size(current_size)} / "
-            f"추가 {format_size(file_size)} / 최대 {PUBLIC_DRIVE_LIMIT_MB}MB"
-        )
-
-    filename = safe_filename(uploaded_file.name)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    save_name = f"{timestamp}_{filename}"
-    save_path = os.path.join(PUBLIC_DRIVE_DIR, save_name)
-
-    with open(save_path, "wb") as f:
-        f.write(file_bytes)
-
-    return save_path
-
-
-def make_thumbnail_bytes(path: str, max_size: int = 180):
-    try:
-        img = Image.open(path)
-
-        try:
-            img.seek(0)
-        except Exception:
-            pass
-
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        img.thumbnail((max_size, max_size))
-
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        buf.seek(0)
-        return buf
-
-    except Exception:
-        return None
-
-
-def delete_drive_file(path: str):
-    try:
-        if os.path.exists(path) and os.path.isfile(path):
-            os.remove(path)
-            return True
-    except Exception:
-        pass
-    return False
-
-
-def render_public_drive():
-    cleanup_old_drive_files()
-
-    with st.expander("부적합 사진", expanded=False):
-        used = get_drive_size()
-        st.caption(f"용량 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
-
-        drive_uploads = st.file_uploader(
-            "부적합 등록",
-            accept_multiple_files=True,
-            type=["jpg", "jpeg", "png", "webp", "heic", "heif", "mpo"],
-            key="public_drive_uploader"
-        )
-
-        if drive_uploads:
-            uploaded_count = 0
-
-            for file in drive_uploads:
-                try:
-                    save_drive_file(file)
-                    uploaded_count += 1
-                except Exception as e:
-                    st.error(str(e))
-
-            if uploaded_count > 0:
-                st.success(f"{uploaded_count}개 등록 완료")
-                st.rerun()
-
-        files = []
-        ensure_public_drive()
-
-        for name in sorted(os.listdir(PUBLIC_DRIVE_DIR), reverse=True):
-            path = os.path.join(PUBLIC_DRIVE_DIR, name)
-            if os.path.isfile(path):
-                files.append((name, path, os.path.getsize(path)))
-
-        if files:
-            st.markdown("#### 등록 목록")
-
-            for idx, (name, path, size) in enumerate(files, start=1):
-                col1, col2, col3 = st.columns([1, 2.2, 0.55])
-
-                thumb = make_thumbnail_bytes(path)
-
-                with col1:
-                    if thumb:
-                        st.image(thumb, width=110)
-                    else:
-                        st.write("파일")
-
-                with col2:
-                    st.caption(name)
-                    st.caption(format_size(size))
-
-                    with open(path, "rb") as f:
-                        st.download_button(
-                            label="다운로드",
-                            data=f,
-                            file_name=name,
-                            use_container_width=True,
-                            key=f"download_{name}_{idx}"
-                        )
-
-                with col3:
-                    if st.button("X", key=f"delete_{name}_{idx}", use_container_width=True):
-                        if delete_drive_file(path):
-                            st.rerun()
-                        else:
-                            st.error("삭제 실패")
-
-        else:
-            st.info("부적합 사진 없음.")
-
-
 def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
     try:
         img = Image.open(input_path)
@@ -321,13 +152,7 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
         output_path = tmp.name
         tmp.close()
 
-        img.save(
-            output_path,
-            format="JPEG",
-            quality=quality,
-            optimize=True
-        )
-
+        img.save(output_path, format="JPEG", quality=quality, optimize=True)
         return output_path
 
     except Exception as e:
@@ -443,8 +268,7 @@ def slide_has_text(slide, target_text: str) -> bool:
 
     for shape in iter_all_shapes(slide.shapes):
         if hasattr(shape, "has_table") and shape.has_table:
-            table = shape.table
-            for row in table.rows:
+            for row in shape.table.rows:
                 for cell in row.cells:
                     if target in normalize_text(cell.text):
                         return True
@@ -462,8 +286,7 @@ def find_text_target(slide, target_text: str):
 
     for shape in iter_all_shapes(slide.shapes):
         if hasattr(shape, "has_table") and shape.has_table:
-            table = shape.table
-            for row in table.rows:
+            for row in shape.table.rows:
                 for cell in row.cells:
                     if normalize_text(cell.text) == target:
                         return ("cell", cell)
@@ -528,15 +351,13 @@ def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
     if missing:
         if strict:
             raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
-        else:
-            return
+        return
 
     photo_kind, photo_obj = photo_target
     if photo_kind != "shape":
         if strict:
             raise ValueError("PHOTO_BOX는 텍스트 상자/도형이어야 합니다.")
-        else:
-            return
+        return
 
     add_picture_to_shape(slide, item.image_path, photo_obj)
 
@@ -544,6 +365,30 @@ def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
     set_target_text(zh_target, item.zh, BASE_FONT_SIZE_PT)
     set_target_text(vi_target, item.vi, BASE_FONT_SIZE_PT)
     set_target_text(my_target, item.my, BASE_FONT_SIZE_PT)
+
+
+def fill_daily_slide(slide, item: DailySlideData, strict: bool = False):
+    photo_target = find_text_target(slide, DAILY_PHOTO_BOX_TEXT)
+    text_target = find_text_target(slide, DAILY_TEXT_BOX_TEXT)
+
+    if photo_target:
+        kind, obj = photo_target
+        if kind == "shape":
+            add_picture_to_shape(slide, item.image_path, obj)
+    elif strict:
+        raise ValueError("PHOTO_BOX_1 플레이스홀더를 찾지 못했습니다.")
+
+    if text_target:
+        set_target_text(
+            text_target,
+            item.text,
+            28,
+            font_name="맑은 고딕",
+            bold=True,
+            font_color=RGBColor(0, 0, 0)
+        )
+    elif strict:
+        raise ValueError("TEXT_BOX_1 플레이스홀더를 찾지 못했습니다.")
 
 
 def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
@@ -602,71 +447,18 @@ def capture_naver_weather_region():
 
         page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_1['scroll_y']})")
         page.wait_for_timeout(1000)
-        page.screenshot(
-            path=weather_1,
-            clip=WEATHER_CAPTURE_1["clip"]
-        )
+        page.screenshot(path=weather_1, clip=WEATHER_CAPTURE_1["clip"])
 
         page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_2['scroll_y']})")
         page.wait_for_timeout(1000)
-        page.screenshot(
-            path=weather_2,
-            clip=WEATHER_CAPTURE_2["clip"]
-        )
+        page.screenshot(path=weather_2, clip=WEATHER_CAPTURE_2["clip"])
 
         browser.close()
 
     return weather_1, weather_2
 
 
-def build_ppt_from_template(
-    slide_data_list: List[SlideData],
-    template_path: str,
-    include_daily_options: bool = False
-) -> io.BytesIO:
-    if not os.path.exists(template_path):
-        raise FileNotFoundError(f"템플릿 파일이 없습니다: {template_path}")
-
-    prs = Presentation(template_path)
-    temp_extra_paths = []
-
-    if include_daily_options:
-        if len(prs.slides) >= 1:
-            fill_date_box(prs.slides[0])
-
-        try:
-            weather_1, weather_2 = capture_naver_weather_region()
-            temp_extra_paths.extend([weather_1, weather_2])
-
-            if len(prs.slides) >= 2:
-                insert_image_to_placeholder(prs.slides[1], WEATHER_BOX_1_TEXT, weather_1)
-
-            if len(prs.slides) >= 3:
-                insert_image_to_placeholder(prs.slides[2], WEATHER_BOX_2_TEXT, weather_2)
-
-        except Exception as e:
-            raise ValueError(f"날씨 캡쳐 실패: {e}")
-
-    start_slide_index = 3 if include_daily_options else 0
-
-    for i, item in enumerate(slide_data_list):
-        target_index = start_slide_index + i
-
-        if target_index >= len(prs.slides):
-            break
-
-        slide = prs.slides[target_index]
-        fill_slide_by_placeholders(
-            slide,
-            item,
-            strict=not include_daily_options
-        )
-
-    keep_slide_count = start_slide_index + len(slide_data_list)
-
-    if include_daily_options:
-        keep_slide_count = max(keep_slide_count, 3)
-
+def delete_extra_slides(prs, keep_slide_count: int):
     for idx in range(len(prs.slides) - 1, keep_slide_count - 1, -1):
         slide = prs.slides[idx]
 
@@ -676,6 +468,67 @@ def build_ppt_from_template(
         slide_id = prs.slides._sldIdLst[idx]
         prs.part.drop_rel(slide_id.rId)
         del prs.slides._sldIdLst[idx]
+
+
+def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
+    if not os.path.exists(TEMPLATE_PPT):
+        raise FileNotFoundError(f"템플릿 파일이 없습니다: {TEMPLATE_PPT}")
+
+    prs = Presentation(TEMPLATE_PPT)
+
+    for i, item in enumerate(slide_data_list):
+        if i >= len(prs.slides):
+            break
+
+        fill_slide_by_placeholders(prs.slides[i], item, strict=True)
+
+    delete_extra_slides(prs, len(slide_data_list))
+
+    out = io.BytesIO()
+    prs.save(out)
+    out.seek(0)
+    return out
+
+
+def build_daily_ppt(
+    original_items: List[DailySlideData],
+    material_paths: List[str]
+) -> io.BytesIO:
+    if not os.path.exists(DAILY_TEMPLATE_PPT):
+        raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
+
+    prs = Presentation(DAILY_TEMPLATE_PPT)
+    temp_extra_paths = []
+
+    if len(prs.slides) >= 1:
+        fill_date_box(prs.slides[0])
+
+    try:
+        weather_1, weather_2 = capture_naver_weather_region()
+        temp_extra_paths.extend([weather_1, weather_2])
+
+        if len(prs.slides) >= 2:
+            insert_image_to_placeholder(prs.slides[1], WEATHER_BOX_1_TEXT, weather_1)
+
+        if len(prs.slides) >= 3:
+            insert_image_to_placeholder(prs.slides[2], WEATHER_BOX_2_TEXT, weather_2)
+
+    except Exception as e:
+        raise ValueError(f"날씨 캡쳐 실패: {e}")
+
+    start_slide_index = 3
+
+    for i, item in enumerate(original_items):
+        target_index = start_slide_index + i
+
+        if target_index >= len(prs.slides):
+            break
+
+        fill_daily_slide(prs.slides[target_index], item, strict=False)
+
+    keep_slide_count = max(3, start_slide_index + len(original_items))
+
+    delete_extra_slides(prs, keep_slide_count)
 
     out = io.BytesIO()
     prs.save(out)
@@ -689,22 +542,6 @@ def build_ppt_from_template(
                 pass
 
     return out
-
-
-def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
-    return build_ppt_from_template(
-        slide_data_list,
-        TEMPLATE_PPT,
-        include_daily_options=False
-    )
-
-
-def build_daily_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
-    return build_ppt_from_template(
-        slide_data_list,
-        DAILY_TEMPLATE_PPT,
-        include_daily_options=True
-    )
 
 
 def render_tbm_input_area():
@@ -787,64 +624,103 @@ def render_tbm_input_area():
 
 
 def render_daily_safety_meeting():
-    with st.expander("일일안전회의", expanded=False):
-        files = st.file_uploader(
-            "사진 업로드",
-            accept_multiple_files=True,
-            type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
-            key="daily_meeting_uploader"
-        )
+    st.markdown("## 일일안전회의")
 
-        if files:
-            slide_inputs = []
-            temp_paths = []
+    original_files = st.file_uploader(
+        "원본사진",
+        accept_multiple_files=True,
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+        key="daily_original_uploader"
+    )
 
-            st.markdown("#### 등록 사진")
+    material_files = st.file_uploader(
+        "자재입고현황",
+        accept_multiple_files=True,
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+        key="daily_material_uploader"
+    )
 
-            for idx, f in enumerate(files):
-                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+    original_items = []
+    material_paths = []
+    temp_paths = []
 
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(f.getbuffer())
-                    original_path = tmp.name
-                    temp_paths.append(original_path)
+    if original_files:
+        st.markdown("#### 원본사진")
 
-                jpg_path = convert_to_jpg(original_path)
-                temp_paths.append(jpg_path)
+        for idx, f in enumerate(original_files):
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
 
-                col1, col2 = st.columns([1, 3])
-                with col1:
-                    st.image(jpg_path, width=120)
-                with col2:
-                    st.caption(f"{idx + 1}번 사진")
-                    st.caption(f.name)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getbuffer())
+                original_path = tmp.name
+                temp_paths.append(original_path)
 
-                slide_inputs.append(SlideData(jpg_path))
+            jpg_path = convert_to_jpg(original_path)
+            temp_paths.append(jpg_path)
 
-            if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
-                try:
-                    with st.spinner("PPT 생성 중..."):
-                        ppt = build_daily_ppt(slide_inputs)
+            with st.expander(f"원본사진 #{idx + 1}", expanded=True):
+                c1, c2 = st.columns([1, 4])
 
-                    st.success("완료!")
-                    st.download_button(
-                        "일일안전회의 PPT 다운로드",
-                        ppt,
-                        file_name=DAILY_OUTPUT_PPT_NAME,
-                        mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                        key="daily_download_btn"
+                with c1:
+                    st.image(jpg_path, width=130)
+
+                with c2:
+                    text_value = st.text_input(
+                        "문구 입력",
+                        value="",
+                        placeholder="예: 자재 반입 확인",
+                        key=f"daily_original_text_{idx}"
                     )
 
-                except Exception as e:
-                    st.error(f"오류 발생: {e}")
+            original_items.append(DailySlideData(jpg_path, text_value))
 
-                finally:
-                    for p in temp_paths:
-                        if os.path.exists(p):
-                            try:
-                                os.remove(p)
-                            except Exception:
-                                pass
+    if material_files:
+        st.markdown("#### 자재입고현황")
+
+        for idx, f in enumerate(material_files):
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getbuffer())
+                material_original_path = tmp.name
+                temp_paths.append(material_original_path)
+
+            material_jpg_path = convert_to_jpg(material_original_path)
+            temp_paths.append(material_jpg_path)
+            material_paths.append(material_jpg_path)
+
+            c1, c2 = st.columns([1, 4])
+            with c1:
+                st.image(material_jpg_path, width=130)
+            with c2:
+                st.caption(f"{idx + 1}번 자재입고현황")
+                st.caption(f.name)
+
+    if original_files or material_files:
+        if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
+            try:
+                with st.spinner("PPT 생성 중..."):
+                    ppt = build_daily_ppt(original_items, material_paths)
+
+                st.success("완료!")
+                st.download_button(
+                    "일일안전회의 PPT 다운로드",
+                    ppt,
+                    file_name=DAILY_OUTPUT_PPT_NAME,
+                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    key="daily_download_btn"
+                )
+
+            except Exception as e:
+                st.error(f"오류 발생: {e}")
+
+            finally:
+                for p in temp_paths:
+                    if os.path.exists(p):
+                        try:
+                            os.remove(p)
+                        except Exception:
+                            pass
 
 
 def main():
@@ -853,16 +729,16 @@ def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     hide_streamlit_ui()
 
-    top_left, top_right = st.columns([3, 1])
-    with top_left:
-        st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
-    with top_right:
-        render_public_drive()
-        render_daily_safety_meeting()
+    st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+
+    render_daily_safety_meeting()
 
     if "GPT_API_KEY" not in st.secrets:
         st.warning("Secrets에 GPT_API_KEY 설정 필요")
         st.stop()
+
+    st.markdown("---")
+    st.markdown("## TBM 번역 PPT")
 
     render_tbm_input_area()
 
