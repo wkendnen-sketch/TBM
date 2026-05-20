@@ -120,7 +120,7 @@ def save_drive_file(uploaded_file):
 
     if current_size + file_size > PUBLIC_DRIVE_LIMIT_BYTES:
         raise ValueError(
-            f"공용 Drive 용량 초과: 현재 {format_size(current_size)} / "
+            f"부적합 사진 갯수 초과: 현재 {format_size(current_size)} / "
             f"추가 {format_size(file_size)} / 최대 {PUBLIC_DRIVE_LIMIT_MB}MB"
         )
 
@@ -138,12 +138,12 @@ def save_drive_file(uploaded_file):
 def render_public_drive():
     cleanup_old_drive_files()
 
-    with st.expander("공용 Drive", expanded=False):
+    with st.expander("부적합 사진", expanded=False):
         used = get_drive_size()
-        st.caption(f"사용량 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
+        st.caption(f"갯수 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
 
         drive_uploads = st.file_uploader(
-            "파일 올리기",
+            "부적합 등록",
             accept_multiple_files=True,
             key="public_drive_uploader"
         )
@@ -152,7 +152,7 @@ def render_public_drive():
             for file in drive_uploads:
                 try:
                     save_drive_file(file)
-                    st.success(f"업로드 완료: {file.name}")
+                    st.success(f"등록 완료: {file.name}")
                 except Exception as e:
                     st.error(str(e))
 
@@ -165,7 +165,7 @@ def render_public_drive():
                 files.append((name, path, os.path.getsize(path)))
 
         if files:
-            st.markdown("#### 공유 파일")
+            st.markdown("#### 부적합")
             for name, path, size in files:
                 with open(path, "rb") as f:
                     st.download_button(
@@ -176,7 +176,7 @@ def render_public_drive():
                         key=f"download_{name}"
                     )
         else:
-            st.info("공유된 파일이 없습니다.")
+            st.info("부적합 사진 없음.")
 
 
 def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
