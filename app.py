@@ -120,7 +120,7 @@ def save_drive_file(uploaded_file):
 
     if current_size + file_size > PUBLIC_DRIVE_LIMIT_BYTES:
         raise ValueError(
-            f"부적합 사진 갯수 초과: 현재 {format_size(current_size)} / "
+            f"부적합 사진 용량 초과: 현재 {format_size(current_size)} / "
             f"추가 {format_size(file_size)} / 최대 {PUBLIC_DRIVE_LIMIT_MB}MB"
         )
 
@@ -135,26 +135,66 @@ def save_drive_file(uploaded_file):
     return save_path
 
 
+def make_thumbnail_bytes(path: str, max_size: int = 180):
+    try:
+        img = Image.open(path)
+
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        img.thumbnail((max_size, max_size))
+
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        buf.seek(0)
+        return buf
+
+    except Exception:
+        return None
+
+
+def delete_drive_file(path: str):
+    try:
+        if os.path.exists(path) and os.path.isfile(path):
+            os.remove(path)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def render_public_drive():
     cleanup_old_drive_files()
 
     with st.expander("부적합 사진", expanded=False):
         used = get_drive_size()
-        st.caption(f"갯수 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
+        st.caption(f"용량 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
 
         drive_uploads = st.file_uploader(
             "부적합 등록",
             accept_multiple_files=True,
+            type=["jpg", "jpeg", "png", "webp", "heic", "heif", "mpo"],
             key="public_drive_uploader"
         )
 
         if drive_uploads:
+            uploaded_count = 0
+
             for file in drive_uploads:
                 try:
                     save_drive_file(file)
-                    st.success(f"등록 완료: {file.name}")
+                    uploaded_count += 1
                 except Exception as e:
                     st.error(str(e))
+
+            if uploaded_count > 0:
+                st.success(f"{uploaded_count}개 등록 완료")
+                st.rerun()
 
         files = []
         ensure_public_drive()
@@ -165,16 +205,39 @@ def render_public_drive():
                 files.append((name, path, os.path.getsize(path)))
 
         if files:
-            st.markdown("#### 부적합")
-            for name, path, size in files:
-                with open(path, "rb") as f:
-                    st.download_button(
-                        label=f"{name} ({format_size(size)})",
-                        data=f,
-                        file_name=name,
-                        use_container_width=True,
-                        key=f"download_{name}"
-                    )
+            st.markdown("#### 등록 목록")
+
+            for idx, (name, path, size) in enumerate(files, start=1):
+                col1, col2, col3 = st.columns([1, 2.2, 0.55])
+
+                thumb = make_thumbnail_bytes(path)
+
+                with col1:
+                    if thumb:
+                        st.image(thumb, width=110)
+                    else:
+                        st.write("파일")
+
+                with col2:
+                    st.caption(name)
+                    st.caption(format_size(size))
+
+                    with open(path, "rb") as f:
+                        st.download_button(
+                            label="다운로드",
+                            data=f,
+                            file_name=name,
+                            use_container_width=True,
+                            key=f"download_{name}_{idx}"
+                        )
+
+                with col3:
+                    if st.button("X", key=f"delete_{name}_{idx}", use_container_width=True):
+                        if delete_drive_file(path):
+                            st.rerun()
+                        else:
+                            st.error("삭제 실패")
+
         else:
             st.info("부적합 사진 없음.")
 
