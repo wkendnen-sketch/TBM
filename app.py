@@ -314,7 +314,7 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
         img.save(
             output_path,
             format="JPEG",
-            quality=88,
+            quality=quality,
             optimize=True
         )
 
@@ -385,11 +385,13 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
                     text += c.get("text", "")
 
     text = text.replace("```json", "").replace("```", "").strip()
-try:
-    parsed = json.loads(text)
-except Exception:
-    text = text.replace("\n", "\\n").replace("\r", "")
-    parsed = json.loads(text)
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        text = re.sub(r'[\x00-\x1F]+', ' ', text)
+        parsed = json.loads(text)
+
     if not isinstance(parsed, list):
         raise ValueError("GPT 응답이 배열이 아닙니다.")
 
