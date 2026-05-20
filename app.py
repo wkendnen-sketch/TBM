@@ -478,7 +478,7 @@ def add_picture_to_shape(slide, image_path, target_shape):
     )
 
 
-def fill_slide_by_placeholders(slide, item: SlideData):
+def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
     photo_target = find_text_target(slide, PHOTO_BOX_TEXT)
     ko_target = find_text_target(slide, KO_BOX_TEXT)
     zh_target = find_text_target(slide, ZH_BOX_TEXT)
@@ -497,11 +497,17 @@ def fill_slide_by_placeholders(slide, item: SlideData):
             missing.append(name)
 
     if missing:
-        raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
+        if strict:
+            raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
+        else:
+            return
 
     photo_kind, photo_obj = photo_target
     if photo_kind != "shape":
-        raise ValueError("PHOTO_BOX는 텍스트 상자/도형이어야 합니다.")
+        if strict:
+            raise ValueError("PHOTO_BOX는 텍스트 상자/도형이어야 합니다.")
+        else:
+            return
 
     add_picture_to_shape(slide, item.image_path, photo_obj)
 
@@ -515,12 +521,12 @@ def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
     target = find_text_target(slide, placeholder_text)
 
     if target is None:
-        raise ValueError(f"{placeholder_text} 플레이스홀더를 찾지 못했습니다.")
+        return
 
     kind, obj = target
 
     if kind != "shape":
-        raise ValueError(f"{placeholder_text}는 도형/텍스트박스여야 합니다.")
+        return
 
     add_picture_to_shape(slide, image_path, obj)
 
@@ -617,7 +623,11 @@ def build_ppt_from_template(
             break
 
         slide = prs.slides[target_index]
-        fill_slide_by_placeholders(slide, item)
+        fill_slide_by_placeholders(
+            slide,
+            item,
+            strict=not include_daily_options
+        )
 
     keep_slide_count = start_slide_index + len(slide_data_list)
 
