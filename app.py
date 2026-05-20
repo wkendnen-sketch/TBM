@@ -15,6 +15,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
+from pptx.dml.color import RGBColor
 
 try:
     from pillow_heif import register_heif_opener
@@ -32,7 +33,6 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 DAILY_TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template2.pptx")
-
 PUBLIC_DRIVE_DIR = os.path.join(BASE_DIR, "public_drive")
 
 BASE_FONT_SIZE_PT = 35
@@ -55,13 +55,12 @@ PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
 
 NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
 
-# 오산시 양산동 좌표
 OSAN_YANGSAN_LAT = 37.196790422777
 OSAN_YANGSAN_LON = 127.02460549856
 
 BROWSER_VIEWPORT = {
-    "width": 1280,
-    "height": 1600,
+    "width": 1920,
+    "height": 2400,
 }
 
 WEATHER_CAPTURE_1 = {
@@ -77,10 +76,10 @@ WEATHER_CAPTURE_1 = {
 WEATHER_CAPTURE_2 = {
     "scroll_y": 300,
     "clip": {
-        "x": 0,
+        "x": 56,
         "y": 399,
-        "width": 806,
-        "height": 312,
+        "width": 750,
+        "height": 290,
     }
 }
 
@@ -455,18 +454,30 @@ def find_text_target(slide, target_text: str):
     return None
 
 
-def set_target_text(target_obj, text: str, size_pt: int, font_name: str = None):
+def set_target_text(
+    target_obj,
+    text: str,
+    size_pt: int,
+    font_name: str = None,
+    bold: bool = False,
+    font_color=None
+):
     kind, obj = target_obj
 
     tf = obj.text_frame
     tf.clear()
+
     p = tf.paragraphs[0]
     run = p.add_run()
     run.text = text
     run.font.size = Pt(size_pt)
+    run.font.bold = bold
 
     if font_name:
         run.font.name = font_name
+
+    if font_color:
+        run.font.color.rgb = font_color
 
 
 def add_picture_to_shape(slide, image_path, target_shape):
@@ -540,7 +551,9 @@ def fill_date_box(slide):
             target,
             get_korean_date_text(),
             30,
-            font_name="맑은 고딕"
+            font_name="맑은 고딕",
+            bold=True,
+            font_color=RGBColor(0, 0, 0)
         )
 
 
@@ -557,6 +570,7 @@ def capture_naver_weather_region():
         context = browser.new_context(
             viewport=BROWSER_VIEWPORT,
             locale="ko-KR",
+            device_scale_factor=2,
             geolocation={
                 "latitude": OSAN_YANGSAN_LAT,
                 "longitude": OSAN_YANGSAN_LON,
