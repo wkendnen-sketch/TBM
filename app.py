@@ -4,6 +4,7 @@ import re
 import json
 import time
 import tempfile
+import subprocess
 from dataclasses import dataclass
 from typing import List
 from datetime import datetime
@@ -62,7 +63,6 @@ BROWSER_VIEWPORT = {
     "height": 1600,
 }
 
-# 여기 좌표는 직접 수정하면 됨
 WEATHER_CAPTURE_1 = {
     "scroll_y": 0,
     "clip": {
@@ -91,6 +91,18 @@ class SlideData:
     zh: str
     vi: str
     my: str
+
+
+def install_playwright_browser():
+    try:
+        subprocess.run(
+            ["playwright", "install", "chromium"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
 
 
 def hide_streamlit_ui():
@@ -748,6 +760,8 @@ def render_daily_safety_meeting():
 
 
 def main():
+    install_playwright_browser()
+
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     hide_streamlit_ui()
 
