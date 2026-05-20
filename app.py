@@ -69,8 +69,8 @@ WEATHER_CAPTURE_1 = {
     "clip": {
         "x": 0,
         "y": 120,
-        "width": 1280,
-        "height": 550,
+        "width": 900,
+        "height": 520,
     }
 }
 
