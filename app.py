@@ -1,6 +1,8 @@
 import os
 import io
+import re
 import json
+import time
 import tempfile
 from dataclasses import dataclass
 from typing import List
@@ -21,6 +23,8 @@ except Exception:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
+PUBLIC_DRIVE_DIR = os.path.join(BASE_DIR, "public_drive")
+
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 APP_VERSION = "26년 5월 버전"
@@ -30,6 +34,10 @@ KO_BOX_TEXT = "1"
 ZH_BOX_TEXT = "2"
 VI_BOX_TEXT = "3"
 MY_BOX_TEXT = "4"
+
+PUBLIC_DRIVE_LIMIT_MB = 100
+PUBLIC_DRIVE_LIMIT_BYTES = PUBLIC_DRIVE_LIMIT_MB * 1024 * 1024
+PUBLIC_DRIVE_EXPIRE_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -41,11 +49,137 @@ class SlideData:
     my: str
 
 
+def hide_streamlit_ui():
+    st.markdown(
+        """
+        <style>
+        #MainMenu {visibility: hidden;}
+        header {visibility: hidden;}
+        footer {visibility: hidden;}
+        .stDeployButton {display: none;}
+        [data-testid="stToolbar"] {display: none;}
+        [data-testid="stDecoration"] {display: none;}
+        [data-testid="stStatusWidget"] {display: none;}
+        [data-testid="manage-app-button"] {display: none;}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+
+def safe_filename(filename: str) -> str:
+    name = os.path.basename(filename)
+    name = re.sub(r"[^a-zA-Z0-9가-힣._ -]", "_", name)
+    return name[:120]
+
+
+def format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    return f"{size_bytes / 1024 / 1024:.1f}MB"
+
+
+def ensure_public_drive():
+    os.makedirs(PUBLIC_DRIVE_DIR, exist_ok=True)
+
+
+def cleanup_old_drive_files():
+    ensure_public_drive()
+    now = time.time()
+
+    for name in os.listdir(PUBLIC_DRIVE_DIR):
+        path = os.path.join(PUBLIC_DRIVE_DIR, name)
+        if os.path.isfile(path):
+            if now - os.path.getmtime(path) > PUBLIC_DRIVE_EXPIRE_SECONDS:
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+
+
+def get_drive_size() -> int:
+    ensure_public_drive()
+    total = 0
+
+    for name in os.listdir(PUBLIC_DRIVE_DIR):
+        path = os.path.join(PUBLIC_DRIVE_DIR, name)
+        if os.path.isfile(path):
+            total += os.path.getsize(path)
+
+    return total
+
+
+def save_drive_file(uploaded_file):
+    ensure_public_drive()
+
+    current_size = get_drive_size()
+    file_bytes = uploaded_file.getvalue()
+    file_size = len(file_bytes)
+
+    if current_size + file_size > PUBLIC_DRIVE_LIMIT_BYTES:
+        raise ValueError(
+            f"공용 Drive 용량 초과: 현재 {format_size(current_size)} / "
+            f"추가 {format_size(file_size)} / 최대 {PUBLIC_DRIVE_LIMIT_MB}MB"
+        )
+
+    filename = safe_filename(uploaded_file.name)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_name = f"{timestamp}_{filename}"
+    save_path = os.path.join(PUBLIC_DRIVE_DIR, save_name)
+
+    with open(save_path, "wb") as f:
+        f.write(file_bytes)
+
+    return save_path
+
+
+def render_public_drive():
+    cleanup_old_drive_files()
+
+    with st.expander("공용 Drive", expanded=False):
+        used = get_drive_size()
+        st.caption(f"사용량 {format_size(used)} / {PUBLIC_DRIVE_LIMIT_MB}MB")
+
+        drive_uploads = st.file_uploader(
+            "파일 올리기",
+            accept_multiple_files=True,
+            key="public_drive_uploader"
+        )
+
+        if drive_uploads:
+            for file in drive_uploads:
+                try:
+                    save_drive_file(file)
+                    st.success(f"업로드 완료: {file.name}")
+                except Exception as e:
+                    st.error(str(e))
+
+        files = []
+        ensure_public_drive()
+
+        for name in sorted(os.listdir(PUBLIC_DRIVE_DIR), reverse=True):
+            path = os.path.join(PUBLIC_DRIVE_DIR, name)
+            if os.path.isfile(path):
+                files.append((name, path, os.path.getsize(path)))
+
+        if files:
+            st.markdown("#### 공유 파일")
+            for name, path, size in files:
+                with open(path, "rb") as f:
+                    st.download_button(
+                        label=f"{name} ({format_size(size)})",
+                        data=f,
+                        file_name=name,
+                        use_container_width=True,
+                        key=f"download_{name}"
+                    )
+        else:
+            st.info("공유된 파일이 없습니다.")
+
+
 def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
-    """
-    아이폰 HEIC / HEIF / MPO 포함 이미지를 JPG로 변환.
-    자동 회전은 하지 않음.
-    """
     try:
         img = Image.open(input_path)
 
@@ -202,10 +336,6 @@ def set_target_text(target_obj, text: str, size_pt: int):
 
 
 def add_picture_cover(slide, image_path, target_shape):
-    """
-    PHOTO_BOX 크기에 그대로 사진 삽입.
-    사진을 회전하지 않고, 박스 크기에 맞게 가로/세로만 조절.
-    """
     slide.shapes.add_picture(
         image_path,
         target_shape.left,
@@ -273,46 +403,13 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
+    hide_streamlit_ui()
 
-    hide_streamlit_style = """
-    <style>
-    #MainMenu {
-        visibility: hidden;
-    }
-
-    header {
-        visibility: hidden;
-    }
-
-    footer {
-        visibility: hidden;
-    }
-
-    .stDeployButton {
-        display: none;
-    }
-
-    [data-testid="stToolbar"] {
-        display: none;
-    }
-
-    [data-testid="stDecoration"] {
-        display: none;
-    }
-
-    [data-testid="stStatusWidget"] {
-        display: none;
-    }
-
-    [data-testid="manage-app-button"] {
-        display: none;
-    }
-    </style>
-    """
-
-    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-
-    st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+    top_left, top_right = st.columns([3, 1])
+    with top_left:
+        st.title(f"🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]")
+    with top_right:
+        render_public_drive()
 
     if "GPT_API_KEY" not in st.secrets:
         st.warning("Secrets에 GPT_API_KEY 설정 필요")
