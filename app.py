@@ -131,6 +131,43 @@ def hide_streamlit_ui():
         .block-container {
             padding-top: 1.2rem !important;
         }
+
+        hr {
+            margin-top: 0.35rem !important;
+            margin-bottom: 0.35rem !important;
+        }
+
+        h2, h3, h4 {
+            margin-top: 0.35rem !important;
+            margin-bottom: 0.35rem !important;
+        }
+
+        div[data-testid="stMarkdownContainer"] p {
+            margin-bottom: 0.25rem !important;
+        }
+
+        div[data-testid="stFileUploader"] {
+            margin-top: -0.2rem !important;
+            margin-bottom: 0.35rem !important;
+        }
+
+        div[data-testid="stVerticalBlock"] {
+            gap: 0.35rem !important;
+        }
+
+        .temp-upload-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin: 0;
+            padding: 0;
+            line-height: 1.1;
+        }
+
+        .temp-small-button button {
+            min-height: 34px !important;
+            padding: 0.25rem 0.4rem !important;
+            font-size: 12px !important;
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -298,10 +335,42 @@ def delete_file(path: str):
 def render_temp_upload():
     cleanup_old_temp_files()
 
-    st.markdown("#### 임시업로드")
+    files = []
+    ensure_temp_upload_dir()
 
-    used = get_temp_upload_size()
-    st.caption(f"용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB")
+    for name in sorted(os.listdir(TEMP_UPLOAD_DIR), reverse=True):
+        path = os.path.join(TEMP_UPLOAD_DIR, name)
+        if os.path.isfile(path):
+            files.append((name, path, os.path.getsize(path)))
+
+    col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
+
+    with col_title:
+        st.markdown("<div class='temp-upload-title'>임시업로드</div>", unsafe_allow_html=True)
+        used = get_temp_upload_size()
+        st.caption(f"용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB")
+
+    with col_zip:
+        st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
+        if files:
+            st.download_button(
+                "ZIP",
+                data=make_temp_upload_zip(),
+                file_name="임시업로드_전체.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="temp_download_all_zip"
+            )
+        else:
+            st.button("ZIP", disabled=True, use_container_width=True, key="temp_download_all_zip_disabled")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with col_delete:
+        st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
+        if st.button("전체삭제", use_container_width=True, key="temp_delete_all"):
+            delete_all_temp_uploads()
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
     upload_files = st.file_uploader(
         "임시업로드",
@@ -324,32 +393,7 @@ def render_temp_upload():
             st.success(f"{uploaded_count}개 등록 완료")
             st.rerun()
 
-    files = []
-    ensure_temp_upload_dir()
-
-    for name in sorted(os.listdir(TEMP_UPLOAD_DIR), reverse=True):
-        path = os.path.join(TEMP_UPLOAD_DIR, name)
-        if os.path.isfile(path):
-            files.append((name, path, os.path.getsize(path)))
-
     if files:
-        col_a, col_b = st.columns([1, 1])
-
-        with col_a:
-            st.download_button(
-                "전체 다운로드 ZIP",
-                data=make_temp_upload_zip(),
-                file_name="임시업로드_전체.zip",
-                mime="application/zip",
-                use_container_width=True,
-                key="temp_download_all_zip"
-            )
-
-        with col_b:
-            if st.button("전체 삭제", use_container_width=True, key="temp_delete_all"):
-                delete_all_temp_uploads()
-                st.rerun()
-
         with st.expander(f"파일 목록 보기 ({len(files)}개)", expanded=False):
             for idx, (name, path, size) in enumerate(files, start=1):
                 col1, col2, col3 = st.columns([1, 3, 0.5])
