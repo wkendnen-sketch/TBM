@@ -343,7 +343,7 @@ def render_temp_upload():
         if os.path.isfile(path):
             files.append((name, path, os.path.getsize(path)))
 
-    col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
+col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
 
 with col_title:
     used = get_temp_upload_size()
