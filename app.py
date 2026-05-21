@@ -155,14 +155,6 @@ def hide_streamlit_ui():
             gap: 0.35rem !important;
         }
 
-        .temp-upload-title {
-            font-size: 18px;
-            font-weight: 700;
-            margin: 0;
-            padding: 0;
-            line-height: 1.1;
-        }
-
         .temp-small-button button {
             min-height: 34px !important;
             padding: 0.25rem 0.4rem !important;
@@ -343,28 +335,29 @@ def render_temp_upload():
         if os.path.isfile(path):
             files.append((name, path, os.path.getsize(path)))
 
-col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
+    col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
 
-with col_title:
-    used = get_temp_upload_size()
-    st.markdown(
-        f"""
-        <div style="
-            display:flex;
-            align-items:center;
-            gap:12px;
-            margin:0;
-            padding:0;
-            line-height:1.1;
-        ">
-            <span style="font-size:18px; font-weight:700;">임시업로드</span>
-            <span style="font-size:13px; color:#666;">
-                용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB
-            </span>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
+    with col_title:
+        used = get_temp_upload_size()
+        st.markdown(
+            f"""
+            <div style="
+                display:flex;
+                align-items:center;
+                gap:12px;
+                margin:0;
+                padding:0;
+                line-height:1.1;
+                min-height:34px;
+            ">
+                <span style="font-size:18px; font-weight:700;">임시업로드</span>
+                <span style="font-size:13px; color:#666;">
+                    용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB
+                </span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
     with col_zip:
         st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
