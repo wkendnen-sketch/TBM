@@ -345,10 +345,26 @@ def render_temp_upload():
 
     col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
 
-    with col_title:
-        st.markdown("<div class='temp-upload-title'>임시업로드</div>", unsafe_allow_html=True)
-        used = get_temp_upload_size()
-        st.caption(f"용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB")
+with col_title:
+    used = get_temp_upload_size()
+    st.markdown(
+        f"""
+        <div style="
+            display:flex;
+            align-items:center;
+            gap:12px;
+            margin:0;
+            padding:0;
+            line-height:1.1;
+        ">
+            <span style="font-size:18px; font-weight:700;">임시업로드</span>
+            <span style="font-size:13px; color:#666;">
+                용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     with col_zip:
         st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
