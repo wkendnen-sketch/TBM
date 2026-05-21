@@ -3,6 +3,7 @@ import io
 import re
 import json
 import time
+import zipfile
 import tempfile
 import subprocess
 from dataclasses import dataclass
@@ -53,7 +54,6 @@ WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
 DAILY_PHOTO_BOX_TEXT = "PHOTO_BOX_1"
 DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
 TIME_BOX_TEXT = "TIME_BOX_1"
-
 HOLD_POINT_TEXT = "HOLD POINT"
 
 TEMP_UPLOAD_LIMIT_MB = 100
@@ -126,6 +126,7 @@ def hide_streamlit_ui():
         [data-testid="stToolbar"] {display: none;}
         [data-testid="stDecoration"] {display: none;}
         [data-testid="stStatusWidget"] {display: none;}
+        [data-testid="manage-app-button"] {display: none;}
 
         .block-container {
             padding-top: 1.2rem !important;
@@ -202,9 +203,17 @@ def get_temp_upload_size() -> int:
 def save_temp_upload_file(uploaded_file):
     ensure_temp_upload_dir()
 
-    current_size = get_temp_upload_size()
     file_bytes = uploaded_file.getvalue()
     file_size = len(file_bytes)
+    original_filename = safe_filename(uploaded_file.name)
+
+    for existing_name in os.listdir(TEMP_UPLOAD_DIR):
+        if existing_name.endswith(original_filename):
+            existing_path = os.path.join(TEMP_UPLOAD_DIR, existing_name)
+            if os.path.isfile(existing_path) and os.path.getsize(existing_path) == file_size:
+                return existing_path
+
+    current_size = get_temp_upload_size()
 
     if current_size + file_size > TEMP_UPLOAD_LIMIT_BYTES:
         raise ValueError(
@@ -212,15 +221,45 @@ def save_temp_upload_file(uploaded_file):
             f"추가 {format_size(file_size)} / 최대 {TEMP_UPLOAD_LIMIT_MB}MB"
         )
 
-    filename = safe_filename(uploaded_file.name)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
-    save_name = f"{timestamp}_{filename}"
+    save_name = f"{timestamp}_{original_filename}"
     save_path = os.path.join(TEMP_UPLOAD_DIR, save_name)
 
     with open(save_path, "wb") as f:
         f.write(file_bytes)
 
     return save_path
+
+
+def make_temp_upload_zip():
+    ensure_temp_upload_dir()
+
+    zip_buffer = io.BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for name in sorted(os.listdir(TEMP_UPLOAD_DIR)):
+            path = os.path.join(TEMP_UPLOAD_DIR, name)
+            if os.path.isfile(path):
+                zip_file.write(path, arcname=name)
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+def delete_all_temp_uploads():
+    ensure_temp_upload_dir()
+    deleted_count = 0
+
+    for name in os.listdir(TEMP_UPLOAD_DIR):
+        path = os.path.join(TEMP_UPLOAD_DIR, name)
+        if os.path.isfile(path):
+            try:
+                os.remove(path)
+                deleted_count += 1
+            except Exception:
+                pass
+
+    return deleted_count
 
 
 def make_thumbnail_bytes(path: str, max_size: int = 180):
@@ -294,36 +333,54 @@ def render_temp_upload():
             files.append((name, path, os.path.getsize(path)))
 
     if files:
-        for idx, (name, path, size) in enumerate(files, start=1):
-            col1, col2, col3 = st.columns([1, 3, 0.5])
+        col_a, col_b = st.columns([1, 1])
 
-            thumb = make_thumbnail_bytes(path)
+        with col_a:
+            st.download_button(
+                "전체 다운로드 ZIP",
+                data=make_temp_upload_zip(),
+                file_name="임시업로드_전체.zip",
+                mime="application/zip",
+                use_container_width=True,
+                key="temp_download_all_zip"
+            )
 
-            with col1:
-                if thumb:
-                    st.image(thumb, width=110)
-                else:
-                    st.write("파일")
+        with col_b:
+            if st.button("전체 삭제", use_container_width=True, key="temp_delete_all"):
+                delete_all_temp_uploads()
+                st.rerun()
 
-            with col2:
-                st.caption(name)
-                st.caption(format_size(size))
+        with st.expander(f"파일 목록 보기 ({len(files)}개)", expanded=False):
+            for idx, (name, path, size) in enumerate(files, start=1):
+                col1, col2, col3 = st.columns([1, 3, 0.5])
 
-                with open(path, "rb") as f:
-                    st.download_button(
-                        label="다운로드",
-                        data=f,
-                        file_name=name,
-                        use_container_width=True,
-                        key=f"temp_download_{name}_{idx}"
-                    )
+                thumb = make_thumbnail_bytes(path)
 
-            with col3:
-                if st.button("X", key=f"temp_delete_{name}_{idx}", use_container_width=True):
-                    if delete_file(path):
-                        st.rerun()
+                with col1:
+                    if thumb:
+                        st.image(thumb, width=110)
                     else:
-                        st.error("삭제 실패")
+                        st.write("파일")
+
+                with col2:
+                    st.caption(name)
+                    st.caption(format_size(size))
+
+                    with open(path, "rb") as f:
+                        st.download_button(
+                            label="다운로드",
+                            data=f,
+                            file_name=name,
+                            use_container_width=True,
+                            key=f"temp_download_{name}_{idx}"
+                        )
+
+                with col3:
+                    if st.button("X", key=f"temp_delete_{name}_{idx}", use_container_width=True):
+                        if delete_file(path):
+                            st.rerun()
+                        else:
+                            st.error("삭제 실패")
     else:
         st.info("임시업로드 파일 없음.")
 
@@ -885,17 +942,6 @@ def render_daily_safety_meeting():
         key="daily_bad_uploader"
     )
 
-    material_files = st.file_uploader(
-        "자재입고현황",
-        accept_multiple_files=True,
-        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
-        key="daily_material_uploader"
-    )
-
-    st.markdown("---")
-    render_temp_upload()
-    st.markdown("---")
-
     bad_items = []
     material_paths = []
     temp_paths = []
@@ -930,6 +976,13 @@ def render_daily_safety_meeting():
 
             bad_items.append(DailySlideData(jpg_path, text_value))
 
+    material_files = st.file_uploader(
+        "자재입고현황",
+        accept_multiple_files=True,
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+        key="daily_material_uploader"
+    )
+
     if material_files:
         st.markdown("#### 자재입고현황")
 
@@ -952,31 +1005,34 @@ def render_daily_safety_meeting():
                 st.caption(f"{idx + 1}번 자재입고현황")
                 st.caption(f.name)
 
-    if bad_files or material_files:
-        if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
-            try:
-                with st.spinner("PPT 생성 중..."):
-                    ppt = build_daily_ppt(bad_items, material_paths)
+    st.markdown("---")
+    render_temp_upload()
+    st.markdown("---")
 
-                st.success("완료!")
-                st.download_button(
-                    "일일안전회의 PPT 다운로드",
-                    ppt,
-                    file_name=DAILY_OUTPUT_PPT_NAME,
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    key="daily_download_btn"
-                )
+    if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
+        try:
+            with st.spinner("PPT 생성 중..."):
+                ppt = build_daily_ppt(bad_items, material_paths)
 
-            except Exception as e:
-                st.error(f"오류 발생: {e}")
+            st.success("완료!")
+            st.download_button(
+                "일일안전회의 PPT 다운로드",
+                ppt,
+                file_name=DAILY_OUTPUT_PPT_NAME,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key="daily_download_btn"
+            )
 
-            finally:
-                for p in temp_paths:
-                    if os.path.exists(p):
-                        try:
-                            os.remove(p)
-                        except Exception:
-                            pass
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
+
+        finally:
+            for p in temp_paths:
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except Exception:
+                        pass
 
 
 def main():
