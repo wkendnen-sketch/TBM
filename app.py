@@ -6,6 +6,7 @@ import time
 import zipfile
 import tempfile
 import subprocess
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import List
 from datetime import datetime
@@ -649,13 +650,13 @@ def add_picture_to_shape(slide, image_path, target_shape):
 
 
 def duplicate_slide(prs, source_slide):
-    source = source_slide._element
     blank_slide_layout = prs.slide_layouts[6]
     new_slide = prs.slides.add_slide(blank_slide_layout)
 
-    for shape in source:
-        new_slide._element.insert_element_before(
-            shape.__copy__(),
+    for shape in source_slide.shapes:
+        new_el = deepcopy(shape.element)
+        new_slide.shapes._spTree.insert_element_before(
+            new_el,
             "p:extLst"
         )
 
@@ -884,13 +885,9 @@ def build_daily_ppt(
 
         fill_daily_slide(prs.slides[target_index], item, strict=False)
 
-    keep_slide_count = max(3, start_slide_index + len(bad_items))
-
-    material_base_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
-    if material_base_idx is not None and material_paths:
-        keep_slide_count = max(keep_slide_count, material_base_idx + len(material_paths))
-
-    delete_extra_slides(prs, keep_slide_count)
+    # 중요:
+    # 일일안전회의 PPT 회색화면 방지를 위해 슬라이드 삭제를 하지 않음.
+    # 불필요한 빈 슬라이드가 남을 수 있지만 PowerPoint XML 손상 위험을 줄임.
 
     out = io.BytesIO()
     prs.save(out)
