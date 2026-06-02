@@ -261,6 +261,31 @@ def save_temp_upload_file(uploaded_file):
     return save_path
 
 
+def save_generated_ppt_to_temp_upload(ppt_bytes: io.BytesIO, filename: str):
+    ensure_temp_upload_dir()
+
+    ppt_bytes.seek(0)
+    data = ppt_bytes.getvalue()
+    file_size = len(data)
+
+    current_size = get_temp_upload_size()
+
+    if current_size + file_size > TEMP_UPLOAD_LIMIT_BYTES:
+        ppt_bytes.seek(0)
+        return False
+
+    safe_name = safe_filename(filename)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    save_name = f"{timestamp}_{safe_name}"
+    save_path = os.path.join(TEMP_UPLOAD_DIR, save_name)
+
+    with open(save_path, "wb") as f:
+        f.write(data)
+
+    ppt_bytes.seek(0)
+    return True
+
+
 def make_temp_upload_zip():
     ensure_temp_upload_dir()
 
@@ -885,9 +910,7 @@ def build_daily_ppt(
 
         fill_daily_slide(prs.slides[target_index], item, strict=False)
 
-    # 중요:
     # 일일안전회의 PPT 회색화면 방지를 위해 슬라이드 삭제를 하지 않음.
-    # 불필요한 빈 슬라이드가 남을 수 있지만 PowerPoint XML 손상 위험을 줄임.
 
     out = io.BytesIO()
     prs.save(out)
@@ -942,6 +965,9 @@ def render_tbm_input_area():
 
         if st.button("PPT 생성", key="main_create_btn"):
             try:
+                if "GPT_API_KEY" not in st.secrets:
+                    raise ValueError("Secrets에 GPT_API_KEY 설정 필요")
+
                 with st.spinner("번역 중..."):
                     ko_list = [s.ko for s in slide_inputs]
 
@@ -960,6 +986,8 @@ def render_tbm_input_area():
 
                 with st.spinner("PPT 생성 중..."):
                     ppt = build_ppt(slide_inputs)
+
+                save_generated_ppt_to_temp_upload(ppt, OUTPUT_PPT_NAME)
 
                 st.success("완료!")
                 st.download_button(
@@ -1055,14 +1083,12 @@ def render_daily_safety_meeting():
                 st.caption(f"{idx + 1}번 자재입고현황")
                 st.caption(f.name)
 
-    st.markdown("---")
-    render_temp_upload()
-    st.markdown("---")
-
     if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
         try:
             with st.spinner("PPT 생성 중..."):
                 ppt = build_daily_ppt(bad_items, material_paths)
+
+            save_generated_ppt_to_temp_upload(ppt, DAILY_OUTPUT_PPT_NAME)
 
             st.success("완료!")
             st.download_button(
@@ -1084,6 +1110,10 @@ def render_daily_safety_meeting():
                     except Exception:
                         pass
 
+    st.markdown("---")
+    render_temp_upload()
+    st.markdown("---")
+
 
 def main():
     install_playwright_browser()
@@ -1094,10 +1124,6 @@ def main():
     render_app_title()
 
     render_daily_safety_meeting()
-
-    if "GPT_API_KEY" not in st.secrets:
-        st.warning("Secrets에 GPT_API_KEY 설정 필요")
-        st.stop()
 
     st.markdown("---")
     st.markdown("## TBM 번역 PPT")
