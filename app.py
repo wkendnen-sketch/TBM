@@ -8,7 +8,7 @@ import tempfile
 import subprocess
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import List
+from typing import List, Tuple, Optional
 from datetime import datetime
 
 import requests
@@ -29,6 +29,11 @@ try:
     from playwright.sync_api import sync_playwright
 except Exception:
     sync_playwright = None
+
+try:
+    import pytesseract
+except Exception:
+    pytesseract = None
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -102,6 +107,49 @@ class SlideData:
 class DailySlideData:
     image_path: str
     text: str = ""
+
+
+@dataclass
+class MaterialWorkItem:
+    image_path: str
+    original_name: str = ""
+    upload_index: int = 0
+    ocr_text: str = ""
+    work_type: str = "material"
+    company: str = "기타업체"
+    number: int = 0
+
+
+COMPANY_ORDER = [
+    "원영건업",
+    "청암기업",
+    "유셀네트웍스",
+    "엠케이지",
+    "KEC",
+    "우신에이스",
+    "진솔",
+    "장한건설",
+]
+
+COMPANY_ALIAS = {
+    "원영건업": ["원영건업", "원영"],
+    "청암기업": ["청암기업", "청암"],
+    "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀"],
+    "엠케이지": ["엠케이지", "MKG", "mkg"],
+    "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이"],
+    "우신에이스": ["우신에이스", "우신"],
+    "진솔": ["진솔"],
+    "장한건설": ["장한건설", "장한"],
+}
+
+HIGH_RISK_KEYWORDS = [
+    "25대 고위험",
+    "25대고위험",
+    "25 대 고위험",
+    "25대",
+    "고위험",
+    "고 위험",
+]
 
 
 def install_playwright_browser():
@@ -595,6 +643,140 @@ def normalize_text(text: str) -> str:
     return str(text).strip().replace("\n", "").replace("\r", "")
 
 
+def normalize_for_match(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).upper()
+
+
+def extract_top_ocr_text(image_path: str, top_ratio: float = 0.45) -> str:
+    """이미지 상단을 넉넉하게 OCR. 실패하면 빈 문자열 반환."""
+    if pytesseract is None:
+        return ""
+
+    try:
+        img = Image.open(image_path)
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+
+        if img.mode not in ("RGB", "L"):
+            img = img.convert("RGB")
+
+        width, height = img.size
+        crop_height = max(1, int(height * top_ratio))
+        top_img = img.crop((0, 0, width, crop_height))
+
+        # 한글+영문 우선, 환경에 kor 학습데이터가 없으면 eng, 그래도 실패하면 기본 OCR
+        for lang in ("kor+eng", "eng", None):
+            try:
+                if lang:
+                    text = pytesseract.image_to_string(top_img, lang=lang)
+                else:
+                    text = pytesseract.image_to_string(top_img)
+                text = str(text or "").strip()
+                if text:
+                    return text
+            except Exception:
+                continue
+
+    except Exception:
+        pass
+
+    return ""
+
+
+def detect_high_risk(text: str) -> bool:
+    compact = normalize_for_match(text)
+    loose = str(text or "")
+
+    if "고위험" in compact:
+        return True
+    if "25대" in compact:
+        return True
+
+    for keyword in HIGH_RISK_KEYWORDS:
+        if normalize_for_match(keyword) in compact or keyword in loose:
+            return True
+
+    return False
+
+
+def detect_company(text: str) -> str:
+    compact = normalize_for_match(text)
+
+    for company in COMPANY_ORDER:
+        aliases = COMPANY_ALIAS.get(company, [company])
+        for alias in aliases:
+            if normalize_for_match(alias) in compact:
+                return company
+
+    return "기타업체"
+
+
+def extract_sort_number(text: str) -> int:
+    raw = str(text or "")
+
+    # 엠케이지 1. 지게차 / 진솔-2 / KEC 지하 2층 등 대부분 대응
+    patterns = [
+        r"(?:지하|B)\s*[-]?\s*(\d+)\s*층",
+        r"[-–_]\s*(\d+)",
+        r"\b(\d+)\s*[.)]",
+        r"(?:^|\s)(\d+)(?:\s|$)",
+    ]
+
+    for pattern in patterns:
+        m = re.search(pattern, raw, flags=re.IGNORECASE)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                pass
+
+    return 0
+
+
+def classify_material_work_image(image_path: str, original_name: str, upload_index: int) -> MaterialWorkItem:
+    ocr_text = extract_top_ocr_text(image_path, top_ratio=0.45)
+    combined_text = f"{ocr_text} {original_name}"
+
+    work_type = "high_risk" if detect_high_risk(combined_text) else "material"
+    company = detect_company(combined_text)
+    number = extract_sort_number(combined_text)
+
+    return MaterialWorkItem(
+        image_path=image_path,
+        original_name=original_name,
+        upload_index=upload_index,
+        ocr_text=ocr_text,
+        work_type=work_type,
+        company=company,
+        number=number,
+    )
+
+
+def company_order_index(company: str) -> int:
+    try:
+        return COMPANY_ORDER.index(company)
+    except ValueError:
+        return 999
+
+
+def sort_material_work_items(items: List[MaterialWorkItem]) -> List[MaterialWorkItem]:
+    # 자재입고현황 전체 → 25대 고위험작업 전체
+    # 각 그룹 내부는 업체순 → 숫자순 → 업로드순
+    type_order = {"material": 0, "high_risk": 1}
+
+    return sorted(
+        items,
+        key=lambda x: (
+            type_order.get(x.work_type, 99),
+            company_order_index(x.company),
+            x.number,
+            x.upload_index,
+        )
+    )
+
+
 def slide_has_text(slide, target_text: str) -> bool:
     target = normalize_text(target_text)
 
@@ -763,8 +945,8 @@ def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
     add_picture_to_shape(slide, image_path, obj)
 
 
-def fill_material_slides(prs, material_paths: List[str]):
-    if not material_paths:
+def fill_material_slides(prs, material_items: List[MaterialWorkItem]):
+    if not material_items:
         return
 
     base_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
@@ -774,7 +956,7 @@ def fill_material_slides(prs, material_paths: List[str]):
 
     base_slide = prs.slides[base_idx]
 
-    for i, image_path in enumerate(material_paths):
+    for i, item in enumerate(material_items):
         if i == 0:
             target_slide = base_slide
         else:
@@ -783,7 +965,7 @@ def fill_material_slides(prs, material_paths: List[str]):
         insert_image_to_placeholder(
             target_slide,
             TIME_BOX_TEXT,
-            image_path
+            item.image_path
         )
 
 
@@ -874,7 +1056,7 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 def build_daily_ppt(
     bad_items: List[DailySlideData],
-    material_paths: List[str]
+    material_items: List[MaterialWorkItem]
 ) -> io.BytesIO:
     if not os.path.exists(DAILY_TEMPLATE_PPT):
         raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
@@ -898,7 +1080,7 @@ def build_daily_ppt(
     except Exception as e:
         raise ValueError(f"날씨 캡쳐 실패: {e}")
 
-    fill_material_slides(prs, material_paths)
+    fill_material_slides(prs, material_items)
 
     start_slide_index = 3
 
@@ -1021,7 +1203,7 @@ def render_daily_safety_meeting():
     )
 
     bad_items = []
-    material_paths = []
+    material_items = []
     temp_paths = []
 
     if bad_files:
@@ -1055,14 +1237,14 @@ def render_daily_safety_meeting():
             bad_items.append(DailySlideData(jpg_path, text_value))
 
     material_files = st.file_uploader(
-        "자재입고현황",
+        "자재입고 및 고위험작업",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
         key="daily_material_uploader"
     )
 
     if material_files:
-        st.markdown("#### 자재입고현황")
+        st.markdown("#### 자재입고 및 고위험작업")
 
         for idx, f in enumerate(material_files):
             suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
@@ -1074,19 +1256,40 @@ def render_daily_safety_meeting():
 
             material_jpg_path = convert_to_jpg(material_original_path)
             temp_paths.append(material_jpg_path)
-            material_paths.append(material_jpg_path)
+
+            item = classify_material_work_image(
+                material_jpg_path,
+                original_name=f.name,
+                upload_index=idx
+            )
+            material_items.append(item)
 
             c1, c2 = st.columns([1, 4])
             with c1:
                 st.image(material_jpg_path, width=130)
             with c2:
-                st.caption(f"{idx + 1}번 자재입고현황")
+                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
+                st.caption(f"{idx + 1}번 / {kind_label} / {item.company} / 번호 {item.number}")
                 st.caption(f.name)
+                if item.ocr_text:
+                    st.caption(f"OCR: {item.ocr_text[:80]}")
+                else:
+                    st.caption("OCR 실패 또는 미설치: 파일명 기준 보조 판단")
+
+    if material_items:
+        sorted_preview = sort_material_work_items(material_items)
+        with st.expander("자재입고 및 고위험작업 정렬 결과", expanded=False):
+            for order_idx, item in enumerate(sorted_preview, start=1):
+                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
+                st.caption(
+                    f"{order_idx}. {kind_label} / {item.company} / 번호 {item.number} / {item.original_name}"
+                )
 
     if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
         try:
             with st.spinner("PPT 생성 중..."):
-                ppt = build_daily_ppt(bad_items, material_paths)
+                sorted_material_items = sort_material_work_items(material_items)
+                ppt = build_daily_ppt(bad_items, sorted_material_items)
 
             save_generated_ppt_to_temp_upload(ppt, DAILY_OUTPUT_PPT_NAME)
 
