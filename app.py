@@ -10,10 +10,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from datetime import datetime
+from difflib import SequenceMatcher
 
 import requests
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
@@ -34,6 +35,13 @@ try:
     import pytesseract
 except Exception:
     pytesseract = None
+
+try:
+    from paddleocr import PaddleOCR
+except Exception:
+    PaddleOCR = None
+
+_PADDLE_OCR = None
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -647,11 +655,141 @@ def normalize_for_match(text: str) -> str:
     return re.sub(r"\s+", "", str(text or "")).upper()
 
 
-def extract_top_ocr_text(image_path: str, top_ratio: float = 0.45) -> str:
-    """이미지 상단을 넉넉하게 OCR. 실패하면 빈 문자열 반환."""
+def get_paddle_ocr():
+    """PaddleOCR 지연 로딩. 설치되지 않았거나 초기화 실패 시 None 반환."""
+    global _PADDLE_OCR
+
+    if PaddleOCR is None:
+        return None
+
+    if _PADDLE_OCR is not None:
+        return _PADDLE_OCR
+
+    try:
+        _PADDLE_OCR = PaddleOCR(
+            lang="korean",
+            use_angle_cls=True,
+            show_log=False
+        )
+        return _PADDLE_OCR
+    except Exception:
+        _PADDLE_OCR = None
+        return None
+
+
+def prepare_ocr_image(img: Image.Image, upscale: int = 2) -> Image.Image:
+    """현장 사진 OCR용 전처리: 원본 해상도 유지 + 대비/선명도 보정."""
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    width, height = img.size
+
+    # 너무 큰 원본은 메모리 보호용으로만 제한. PPT용 축소와 별개로 OCR은 최대한 크게 유지.
+    longest = max(width, height)
+    if longest > 4200:
+        ratio = 4200 / longest
+        img = img.resize((int(width * ratio), int(height * ratio)), Image.LANCZOS)
+        width, height = img.size
+
+    if upscale > 1 and max(width, height) < 2600:
+        img = img.resize((width * upscale, height * upscale), Image.LANCZOS)
+
+    gray = img.convert("L")
+    gray = ImageOps.autocontrast(gray)
+    gray = ImageEnhance.Contrast(gray).enhance(1.8)
+    gray = ImageEnhance.Sharpness(gray).enhance(2.0)
+    gray = gray.filter(ImageFilter.SHARPEN)
+
+    return gray
+
+
+def ocr_with_paddle(img: Image.Image) -> str:
+    ocr = get_paddle_ocr()
+    if ocr is None:
+        return ""
+
+    temp_path = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".png")
+        temp_path = tmp.name
+        tmp.close()
+
+        if img.mode != "RGB":
+            save_img = img.convert("RGB")
+        else:
+            save_img = img
+
+        save_img.save(temp_path, format="PNG")
+
+        result = ocr.ocr(temp_path, cls=True)
+        lines = []
+
+        if result:
+            for page in result:
+                if not page:
+                    continue
+                for line in page:
+                    try:
+                        text = line[1][0]
+                        if text:
+                            lines.append(str(text))
+                    except Exception:
+                        continue
+
+        return "\n".join(lines).strip()
+
+    except Exception:
+        return ""
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+def ocr_with_tesseract(img: Image.Image) -> str:
     if pytesseract is None:
         return ""
 
+    configs = [
+        "--oem 3 --psm 6",
+        "--oem 3 --psm 11",
+        "--oem 3 --psm 12",
+    ]
+    langs = ["kor+eng", "eng", None]
+
+    best_text = ""
+
+    for lang in langs:
+        for config in configs:
+            try:
+                if lang:
+                    text = pytesseract.image_to_string(img, lang=lang, config=config)
+                else:
+                    text = pytesseract.image_to_string(img, config=config)
+                text = str(text or "").strip()
+                if len(text) > len(best_text):
+                    best_text = text
+            except Exception:
+                continue
+
+    return best_text.strip()
+
+
+def extract_ocr_text(image_path: str, top_ratio: float = 0.55) -> str:
+    """
+    OCR 강화 버전.
+    - PPT용 축소본이 아니라 원본 이미지 경로를 넣는 것이 핵심.
+    - 전체/상단/좌측 영역을 함께 읽어 회사명, 25대 고위험 문구 누락을 줄임.
+    - PaddleOCR이 있으면 우선 사용하고, 없으면 pytesseract로 fallback.
+    """
     try:
         img = Image.open(image_path)
         try:
@@ -659,30 +797,50 @@ def extract_top_ocr_text(image_path: str, top_ratio: float = 0.45) -> str:
         except Exception:
             pass
 
-        if img.mode not in ("RGB", "L"):
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        if img.mode != "RGB":
             img = img.convert("RGB")
 
         width, height = img.size
-        crop_height = max(1, int(height * top_ratio))
-        top_img = img.crop((0, 0, width, crop_height))
+        crop_h = max(1, int(height * top_ratio))
 
-        # 한글+영문 우선, 환경에 kor 학습데이터가 없으면 eng, 그래도 실패하면 기본 OCR
-        for lang in ("kor+eng", "eng", None):
-            try:
-                if lang:
-                    text = pytesseract.image_to_string(top_img, lang=lang)
-                else:
-                    text = pytesseract.image_to_string(top_img)
-                text = str(text or "").strip()
-                if text:
-                    return text
-            except Exception:
-                continue
+        regions = [
+            img,
+            img.crop((0, 0, width, crop_h)),
+            img.crop((0, 0, int(width * 0.68), height)),
+            img.crop((0, 0, int(width * 0.68), crop_h)),
+        ]
+
+        texts = []
+        seen = set()
+
+        for region in regions:
+            prepared = prepare_ocr_image(region)
+
+            text = ocr_with_paddle(prepared)
+            if not text:
+                text = ocr_with_tesseract(prepared)
+
+            text = str(text or "").strip()
+            key = normalize_for_match(text)
+
+            if text and key not in seen:
+                texts.append(text)
+                seen.add(key)
+
+        return "\n".join(texts).strip()
 
     except Exception:
-        pass
+        return ""
 
-    return ""
+
+def extract_top_ocr_text(image_path: str, top_ratio: float = 0.55) -> str:
+    """기존 함수명 호환용. 내부는 강화 OCR 사용."""
+    return extract_ocr_text(image_path, top_ratio=top_ratio)
 
 
 def detect_high_risk(text: str) -> bool:
@@ -710,6 +868,30 @@ def detect_company(text: str) -> str:
             if normalize_for_match(alias) in compact:
                 return company
 
+    # OCR 오인식 보정: 공백/기호 제거 후 유사도 기반 보조 판단
+    tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or ""))
+    compact_tokens = [normalize_for_match(t) for t in tokens]
+
+    best_company = "기타업체"
+    best_score = 0.0
+
+    for company in COMPANY_ORDER:
+        aliases = COMPANY_ALIAS.get(company, [company])
+        for alias in aliases:
+            alias_norm = normalize_for_match(alias)
+            if not alias_norm:
+                continue
+            for token in compact_tokens:
+                if len(token) < 2:
+                    continue
+                score = SequenceMatcher(None, alias_norm, token).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_company = company
+
+    if best_score >= 0.72:
+        return best_company
+
     return "기타업체"
 
 
@@ -735,8 +917,15 @@ def extract_sort_number(text: str) -> int:
     return 0
 
 
-def classify_material_work_image(image_path: str, original_name: str, upload_index: int) -> MaterialWorkItem:
-    ocr_text = extract_top_ocr_text(image_path, top_ratio=0.45)
+def classify_material_work_image(
+    image_path: str,
+    original_name: str,
+    upload_index: int,
+    ocr_image_path: str = None
+) -> MaterialWorkItem:
+    # OCR은 원본 이미지로, PPT 삽입은 변환/축소된 JPG로 분리
+    ocr_source = ocr_image_path or image_path
+    ocr_text = extract_ocr_text(ocr_source, top_ratio=0.60)
     combined_text = f"{ocr_text} {original_name}"
 
     work_type = "high_risk" if detect_high_risk(combined_text) else "material"
@@ -1260,7 +1449,8 @@ def render_daily_safety_meeting():
             item = classify_material_work_image(
                 material_jpg_path,
                 original_name=f.name,
-                upload_index=idx
+                upload_index=idx,
+                ocr_image_path=material_original_path
             )
             material_items.append(item)
 
@@ -1271,10 +1461,7 @@ def render_daily_safety_meeting():
                 kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
                 st.caption(f"{idx + 1}번 / {kind_label} / {item.company} / 번호 {item.number}")
                 st.caption(f.name)
-                if item.ocr_text:
-                    st.caption(f"OCR: {item.ocr_text[:80]}")
-                else:
-                    st.caption("OCR 실패 또는 미설치: 파일명 기준 보조 판단")
+                # OCR 원문/실패 문구는 화면에 표시하지 않음.
 
     if material_items:
         sorted_preview = sort_material_work_items(material_items)
