@@ -1878,7 +1878,7 @@ def render_shared_notice_board():
     notice_text = st.text_area(
         "",
         value=current_text,
-        height=800,
+        height=260,
         key="shared_notice_text_area",
         placeholder="여기에 공지사항, 작업내용, 전달사항 등을 길게 붙여넣고 저장하세요."
     )
