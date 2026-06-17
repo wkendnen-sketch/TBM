@@ -1141,21 +1141,68 @@ def slide_has_text(slide, target_text: str) -> bool:
 
 
 def find_text_target(slide, target_text: str):
-    target = normalize_text(target_text)
+    """
+    PPT 플레이스홀더 탐색 강화 버전.
+    1) 도형 안 텍스트가 target_text와 정확히 일치하면 반환
+    2) 도형 이름(shape.name)이 target_text와 정확히 일치하면 반환
+    3) 그룹도형 내부 도형까지 탐색
+    4) 표 셀도 탐색
 
+    PowerPoint에서 텍스트박스를 복사/수정하면
+    화면에는 1,2,3,4가 보여도 shape.name은 TextBox 7처럼 바뀔 수 있어서
+    텍스트와 도형 이름을 둘 다 확인한다.
+    """
+    target = normalize_text(target_text)
+    target_match = normalize_for_match(target_text)
+
+    # 1차: 텍스트 정확 일치
     for shape in iter_all_shapes(slide.shapes):
         if has_text(shape):
             if normalize_text(shape.text) == target:
                 return ("shape", shape)
 
+    # 2차: 도형 이름 정확 일치
+    for shape in iter_all_shapes(slide.shapes):
+        shape_name = normalize_text(getattr(shape, "name", ""))
+        if shape_name == target:
+            return ("shape", shape)
+
+    # 3차: 공백/줄바꿈 제거 후 텍스트 일치
+    for shape in iter_all_shapes(slide.shapes):
+        if has_text(shape):
+            if normalize_for_match(shape.text) == target_match:
+                return ("shape", shape)
+
+    # 4차: 공백/줄바꿈 제거 후 도형 이름 일치
+    for shape in iter_all_shapes(slide.shapes):
+        shape_name = getattr(shape, "name", "")
+        if normalize_for_match(shape_name) == target_match:
+            return ("shape", shape)
+
+    # 5차: 표 셀 탐색
     for shape in iter_all_shapes(slide.shapes):
         if hasattr(shape, "has_table") and shape.has_table:
             for row in shape.table.rows:
                 for cell in row.cells:
                     if normalize_text(cell.text) == target:
                         return ("cell", cell)
+                    if normalize_for_match(cell.text) == target_match:
+                        return ("cell", cell)
 
     return None
+
+
+def debug_slide_placeholders(slide):
+    """Streamlit 화면에서 PPT 도형 이름/텍스트 확인용."""
+    rows = []
+    for idx, shape in enumerate(iter_all_shapes(slide.shapes), start=1):
+        rows.append({
+            "순번": idx,
+            "도형이름": getattr(shape, "name", ""),
+            "텍스트": normalize_text(shape.text) if has_text(shape) else "",
+            "타입": str(getattr(shape, "shape_type", "")),
+        })
+    return rows
 
 
 def find_slide_index_by_text(prs, target_text: str):
