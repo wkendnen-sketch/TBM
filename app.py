@@ -1205,6 +1205,29 @@ def debug_slide_placeholders(slide):
     return rows
 
 
+
+def find_tbm_translation_cells(slide):
+    """TBM 템플릿 표 구조용 안전장치.
+    sample_template.pptx는 1,2,3,4가 표 셀에 들어있으므로,
+    텍스트 탐색이 실패해도 표의 우측 2~5행 셀을 직접 사용한다.
+    """
+    for shape in iter_all_shapes(slide.shapes):
+        try:
+            if hasattr(shape, "has_table") and shape.has_table:
+                table = shape.table
+                if len(table.rows) >= 6 and len(table.columns) >= 2:
+                    # 기본 템플릿 구조: 2~5행, 우측 열이 1~4 번역칸
+                    return {
+                        "1": ("cell", table.cell(2, 1)),
+                        "2": ("cell", table.cell(3, 1)),
+                        "3": ("cell", table.cell(4, 1)),
+                        "4": ("cell", table.cell(5, 1)),
+                    }
+        except Exception:
+            continue
+    return {}
+
+
 def find_slide_index_by_text(prs, target_text: str):
     for idx, slide in enumerate(prs.slides):
         if slide_has_text(slide, target_text):
@@ -1326,6 +1349,17 @@ def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
     vi_target = find_text_target(slide, VI_BOX_TEXT)
     my_target = find_text_target(slide, MY_BOX_TEXT)
 
+    # 안전장치: sample_template.pptx의 1,2,3,4가 표 셀로 들어간 경우 직접 매칭
+    table_cells = find_tbm_translation_cells(slide)
+    if ko_target is None:
+        ko_target = table_cells.get("1")
+    if zh_target is None:
+        zh_target = table_cells.get("2")
+    if vi_target is None:
+        vi_target = table_cells.get("3")
+    if my_target is None:
+        my_target = table_cells.get("4")
+
     missing = []
     for name, obj in [
         ("PHOTO_BOX", photo_target),
@@ -1339,7 +1373,23 @@ def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
 
     if missing:
         if strict:
-            raise ValueError(f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}")
+            debug = []
+            for shape in iter_all_shapes(slide.shapes):
+                try:
+                    debug.append(f"name=[{getattr(shape, 'name', '')}] text=[{getattr(shape, 'text', '')}]")
+                    if hasattr(shape, "has_table") and shape.has_table:
+                        for r, row in enumerate(shape.table.rows):
+                            for c, cell in enumerate(row.cells):
+                                debug.append(f"table[{r},{c}]=[{cell.text}]")
+                except Exception:
+                    pass
+            raise ValueError(
+                f"슬라이드에서 플레이스홀더를 찾지 못했습니다: {', '.join(missing)}
+
+"
+                + "
+".join(debug[:80])
+            )
         return
 
     photo_kind, photo_obj = photo_target
