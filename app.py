@@ -656,7 +656,7 @@ def normalize_for_match(text: str) -> str:
 
 
 def get_paddle_ocr():
-    """PaddleOCR 지연 로딩. 설치되지 않았거나 초기화 실패 시 None 반환."""
+    """PaddleOCR 지연 로딩. 여러 버전 호환을 위해 옵션을 단계적으로 시도."""
     global _PADDLE_OCR
 
     if PaddleOCR is None:
@@ -665,20 +665,53 @@ def get_paddle_ocr():
     if _PADDLE_OCR is not None:
         return _PADDLE_OCR
 
-    try:
-        _PADDLE_OCR = PaddleOCR(
-            lang="korean",
-            use_angle_cls=True,
-            show_log=False
-        )
-        return _PADDLE_OCR
-    except Exception:
-        _PADDLE_OCR = None
-        return None
+    option_list = [
+        dict(lang="korean", use_angle_cls=True, show_log=False, det_db_box_thresh=0.25, det_db_unclip_ratio=2.0),
+        dict(lang="korean", use_angle_cls=True, show_log=False),
+        dict(lang="korean", use_angle_cls=True),
+        dict(lang="korean"),
+    ]
+
+    for opts in option_list:
+        try:
+            _PADDLE_OCR = PaddleOCR(**opts)
+            return _PADDLE_OCR
+        except Exception:
+            continue
+
+    _PADDLE_OCR = None
+    return None
 
 
-def prepare_ocr_image(img: Image.Image, upscale: int = 2) -> Image.Image:
-    """현장 사진 OCR용 전처리: 원본 해상도 유지 + 대비/선명도 보정."""
+def normalize_ocr_text(text: str) -> str:
+    text = str(text or "")
+    text = text.replace("|", "I").replace("﹣", "-").replace("–", "-").replace("—", "-")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def resize_for_ocr(img: Image.Image, min_longest: int = 2600, max_longest: int = 4600) -> Image.Image:
+    """OCR용 크기 보정. 작으면 키우고, 너무 크면 메모리 보호 수준에서만 줄임."""
+    width, height = img.size
+    longest = max(width, height)
+
+    if longest < min_longest:
+        ratio = min_longest / max(1, longest)
+        img = img.resize((int(width * ratio), int(height * ratio)), Image.LANCZOS)
+    elif longest > max_longest:
+        ratio = max_longest / longest
+        img = img.resize((int(width * ratio), int(height * ratio)), Image.LANCZOS)
+
+    return img
+
+
+def make_ocr_preprocess_variants(img: Image.Image) -> List[Image.Image]:
+    """
+    현장 문서용 강화 OCR 전처리.
+    같은 영역에서 여러 이미지 버전을 만들어 OCR 결과를 합친다.
+    느려지지만 작은 글씨/그림자/흐림 대응력이 올라간다.
+    """
     try:
         img = ImageOps.exif_transpose(img)
     except Exception:
@@ -687,25 +720,61 @@ def prepare_ocr_image(img: Image.Image, upscale: int = 2) -> Image.Image:
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    width, height = img.size
+    img = resize_for_ocr(img)
 
-    # 너무 큰 원본은 메모리 보호용으로만 제한. PPT용 축소와 별개로 OCR은 최대한 크게 유지.
-    longest = max(width, height)
-    if longest > 4200:
-        ratio = 4200 / longest
-        img = img.resize((int(width * ratio), int(height * ratio)), Image.LANCZOS)
-        width, height = img.size
+    variants = []
 
-    if upscale > 1 and max(width, height) < 2600:
-        img = img.resize((width * upscale, height * upscale), Image.LANCZOS)
+    # 1) 원본 RGB 확대본
+    variants.append(img)
 
     gray = img.convert("L")
     gray = ImageOps.autocontrast(gray)
-    gray = ImageEnhance.Contrast(gray).enhance(1.8)
-    gray = ImageEnhance.Sharpness(gray).enhance(2.0)
-    gray = gray.filter(ImageFilter.SHARPEN)
 
-    return gray
+    # 2) 기본 흑백 대비 강화
+    v1 = ImageEnhance.Contrast(gray).enhance(1.8)
+    v1 = ImageEnhance.Sharpness(v1).enhance(2.2)
+    v1 = v1.filter(ImageFilter.SHARPEN)
+    variants.append(v1)
+
+    # 3) 더 강한 대비/샤프닝
+    v2 = ImageEnhance.Contrast(gray).enhance(2.6)
+    v2 = ImageEnhance.Sharpness(v2).enhance(3.0)
+    v2 = v2.filter(ImageFilter.SHARPEN)
+    variants.append(v2)
+
+    # 4) 밝기 보정 + 대비
+    v3 = ImageEnhance.Brightness(gray).enhance(1.12)
+    v3 = ImageOps.autocontrast(v3)
+    v3 = ImageEnhance.Contrast(v3).enhance(2.1)
+    variants.append(v3)
+
+    # 5) 이진화 1 - 일반 문서
+    try:
+        v4 = gray.point(lambda p: 255 if p > 165 else 0)
+        variants.append(v4)
+    except Exception:
+        pass
+
+    # 6) 이진화 2 - 어두운 사진/그림자 대응
+    try:
+        v5 = gray.point(lambda p: 255 if p > 135 else 0)
+        variants.append(v5)
+    except Exception:
+        pass
+
+    # 7) 가장 강한 확대 + 샤프닝
+    try:
+        w, h = img.size
+        if max(w, h) < 4200:
+            v6 = img.resize((int(w * 1.35), int(h * 1.35)), Image.LANCZOS).convert("L")
+            v6 = ImageOps.autocontrast(v6)
+            v6 = ImageEnhance.Contrast(v6).enhance(2.4)
+            v6 = ImageEnhance.Sharpness(v6).enhance(3.5)
+            variants.append(v6)
+    except Exception:
+        pass
+
+    return variants
 
 
 def ocr_with_paddle(img: Image.Image) -> str:
@@ -719,16 +788,15 @@ def ocr_with_paddle(img: Image.Image) -> str:
         temp_path = tmp.name
         tmp.close()
 
-        if img.mode != "RGB":
-            save_img = img.convert("RGB")
-        else:
-            save_img = img
-
+        save_img = img.convert("RGB") if img.mode != "RGB" else img
         save_img.save(temp_path, format="PNG")
 
-        result = ocr.ocr(temp_path, cls=True)
-        lines = []
+        try:
+            result = ocr.ocr(temp_path, cls=True)
+        except TypeError:
+            result = ocr.ocr(temp_path)
 
+        lines = []
         if result:
             for page in result:
                 if not page:
@@ -736,12 +804,17 @@ def ocr_with_paddle(img: Image.Image) -> str:
                 for line in page:
                     try:
                         text = line[1][0]
-                        if text:
+                        score = 1.0
+                        try:
+                            score = float(line[1][1])
+                        except Exception:
+                            pass
+                        if text and score >= 0.25:
                             lines.append(str(text))
                     except Exception:
                         continue
 
-        return "\n".join(lines).strip()
+        return normalize_ocr_text("\n".join(lines))
 
     except Exception:
         return ""
@@ -762,11 +835,11 @@ def ocr_with_tesseract(img: Image.Image) -> str:
         "--oem 3 --psm 6",
         "--oem 3 --psm 11",
         "--oem 3 --psm 12",
+        "--oem 3 --psm 4",
     ]
-    langs = ["kor+eng", "eng", None]
+    langs = ["kor+eng", "kor", "eng", None]
 
     best_text = ""
-
     for lang in langs:
         for config in configs:
             try:
@@ -774,21 +847,49 @@ def ocr_with_tesseract(img: Image.Image) -> str:
                     text = pytesseract.image_to_string(img, lang=lang, config=config)
                 else:
                     text = pytesseract.image_to_string(img, config=config)
-                text = str(text or "").strip()
-                if len(text) > len(best_text):
+                text = normalize_ocr_text(text)
+                if len(normalize_for_match(text)) > len(normalize_for_match(best_text)):
                     best_text = text
             except Exception:
                 continue
 
-    return best_text.strip()
+    return normalize_ocr_text(best_text)
 
 
-def extract_ocr_text(image_path: str, top_ratio: float = 0.55) -> str:
+def get_ocr_regions(img: Image.Image, top_ratio: float = 0.65) -> List[Tuple[str, Image.Image]]:
+    """전체/상단/좌측/중앙 등 여러 영역을 읽어 업체명·25대고위험 누락을 줄임."""
+    width, height = img.size
+    top_h = max(1, int(height * top_ratio))
+    mid_y1 = int(height * 0.18)
+    mid_y2 = int(height * 0.78)
+
+    regions = [
+        ("full", img),
+        ("top", img.crop((0, 0, width, top_h))),
+        ("top_left", img.crop((0, 0, int(width * 0.72), top_h))),
+        ("top_right", img.crop((int(width * 0.28), 0, width, top_h))),
+        ("left", img.crop((0, 0, int(width * 0.72), height))),
+        ("center", img.crop((int(width * 0.10), mid_y1, int(width * 0.90), mid_y2))),
+    ]
+    return regions
+
+
+def append_unique_text(texts: List[str], seen: set, text: str):
+    text = normalize_ocr_text(text)
+    key = normalize_for_match(text)
+    if text and key and key not in seen:
+        texts.append(text)
+        seen.add(key)
+
+
+def extract_ocr_text(image_path: str, top_ratio: float = 0.65) -> str:
     """
-    OCR 강화 버전.
-    - PPT용 축소본이 아니라 원본 이미지 경로를 넣는 것이 핵심.
-    - 전체/상단/좌측 영역을 함께 읽어 회사명, 25대 고위험 문구 누락을 줄임.
-    - PaddleOCR이 있으면 우선 사용하고, 없으면 pytesseract로 fallback.
+    정확도 우선 강화 OCR.
+    - 원본 이미지 기준 OCR
+    - 전체/상단/좌측/중앙 영역 OCR
+    - 영역별 전처리 5~7종 OCR
+    - PaddleOCR 우선 + Tesseract 보조
+    - 결과를 합쳐 분류 판단에 사용
     """
     try:
         img = Image.open(image_path)
@@ -805,78 +906,119 @@ def extract_ocr_text(image_path: str, top_ratio: float = 0.55) -> str:
         if img.mode != "RGB":
             img = img.convert("RGB")
 
-        width, height = img.size
-        crop_h = max(1, int(height * top_ratio))
-
-        regions = [
-            img,
-            img.crop((0, 0, width, crop_h)),
-            img.crop((0, 0, int(width * 0.68), height)),
-            img.crop((0, 0, int(width * 0.68), crop_h)),
-        ]
-
-        texts = []
+        all_texts = []
         seen = set()
 
-        for region in regions:
-            prepared = prepare_ocr_image(region)
+        paddle_available = get_paddle_ocr() is not None
 
-            text = ocr_with_paddle(prepared)
-            if not text:
-                text = ocr_with_tesseract(prepared)
+        for region_name, region in get_ocr_regions(img, top_ratio=top_ratio):
+            variants = make_ocr_preprocess_variants(region)
 
-            text = str(text or "").strip()
-            key = normalize_for_match(text)
+            for variant_idx, variant in enumerate(variants):
+                # PaddleOCR은 정확도가 좋으므로 모든 주요 전처리 버전에 실행
+                if paddle_available:
+                    append_unique_text(all_texts, seen, ocr_with_paddle(variant))
 
-            if text and key not in seen:
-                texts.append(text)
-                seen.add(key)
+                # Tesseract는 느리고 중복이 많으므로 원본/강화/이진화 일부만 보조 실행
+                if variant_idx in (1, 2, 4):
+                    append_unique_text(all_texts, seen, ocr_with_tesseract(variant))
 
-        return "\n".join(texts).strip()
+        return normalize_ocr_text("\n".join(all_texts))
 
     except Exception:
         return ""
 
 
-def extract_top_ocr_text(image_path: str, top_ratio: float = 0.55) -> str:
+def extract_top_ocr_text(image_path: str, top_ratio: float = 0.65) -> str:
     """기존 함수명 호환용. 내부는 강화 OCR 사용."""
     return extract_ocr_text(image_path, top_ratio=top_ratio)
+
+
+def fuzzy_contains(text: str, candidates: List[str], threshold: float = 0.72) -> bool:
+    compact = normalize_for_match(text)
+    if not compact:
+        return False
+
+    for cand in candidates:
+        cand_norm = normalize_for_match(cand)
+        if not cand_norm:
+            continue
+        if cand_norm in compact:
+            return True
+
+        # 긴 OCR 문자열 안에서 후보 길이만큼 잘라 유사도 검사
+        n = len(cand_norm)
+        if n <= 1:
+            continue
+        for i in range(0, max(1, len(compact) - n + 1)):
+            part = compact[i:i + n]
+            if SequenceMatcher(None, cand_norm, part).ratio() >= threshold:
+                return True
+
+    return False
 
 
 def detect_high_risk(text: str) -> bool:
     compact = normalize_for_match(text)
     loose = str(text or "")
 
-    if "고위험" in compact:
+    if "고위험" in compact or "고 위험" in loose:
         return True
-    if "25대" in compact:
+    if "25대" in compact or "25 대" in loose:
         return True
 
-    for keyword in HIGH_RISK_KEYWORDS:
-        if normalize_for_match(keyword) in compact or keyword in loose:
-            return True
+    # OCR에서 숫자/한글이 일부 깨지는 경우 보정
+    high_risk_candidates = HIGH_RISK_KEYWORDS + [
+        "이십오대고위험",
+        "25고위험",
+        "25대위험",
+        "고위헙",
+        "고위힘",
+        "고위혐",
+        "고위험작업",
+        "고위험 작업",
+    ]
 
-    return False
+    if fuzzy_contains(compact, high_risk_candidates, threshold=0.70):
+        return True
+
+    # 25와 위험류 단어가 따로 읽힌 경우
+    has_25 = bool(re.search(r"2\s*5|25|이십오", compact))
+    has_risk = fuzzy_contains(compact, ["고위험", "위험", "위헙", "위혐"], threshold=0.68)
+    return has_25 and has_risk
 
 
 def detect_company(text: str) -> str:
     compact = normalize_for_match(text)
 
+    # 자주 틀리는 OCR 후보 추가
+    extra_alias = {
+        "원영건업": ["원영건업", "원영", "원영건", "원명건업"],
+        "청암기업": ["청암기업", "청암", "청암기엽", "청암업"],
+        "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀", "유셀네트워크", "유셀네트웍"],
+        "엠케이지": ["엠케이지", "MKG", "mkg", "엠케이", "엠케", "MK G"],
+        "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이", "K E C"],
+        "우신에이스": ["우신에이스", "우신", "우신에이", "우신이스"],
+        "진솔": ["진솔", "진술", "진슬", "진솔건", "진솔건설"],
+        "장한건설": ["장한건설", "장한", "장한전설", "장한건", "장한건썰"],
+    }
+
     for company in COMPANY_ORDER:
-        aliases = COMPANY_ALIAS.get(company, [company])
+        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
         for alias in aliases:
             if normalize_for_match(alias) in compact:
                 return company
 
-    # OCR 오인식 보정: 공백/기호 제거 후 유사도 기반 보조 판단
+    # OCR 오인식 보정: 토큰 및 슬라이딩 유사도 기반 판단
     tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or ""))
     compact_tokens = [normalize_for_match(t) for t in tokens]
+    compact_tokens.append(compact)
 
     best_company = "기타업체"
     best_score = 0.0
 
     for company in COMPANY_ORDER:
-        aliases = COMPANY_ALIAS.get(company, [company])
+        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
         for alias in aliases:
             alias_norm = normalize_for_match(alias)
             if not alias_norm:
@@ -884,12 +1026,24 @@ def detect_company(text: str) -> str:
             for token in compact_tokens:
                 if len(token) < 2:
                     continue
+
+                # 토큰 전체 비교
                 score = SequenceMatcher(None, alias_norm, token).ratio()
                 if score > best_score:
                     best_score = score
                     best_company = company
 
-    if best_score >= 0.72:
+                # 긴 토큰 안에 업체명이 섞여 있는 경우 부분 비교
+                n = len(alias_norm)
+                if len(token) >= n >= 2:
+                    for i in range(0, len(token) - n + 1):
+                        part = token[i:i + n]
+                        score = SequenceMatcher(None, alias_norm, part).ratio()
+                        if score > best_score:
+                            best_score = score
+                            best_company = company
+
+    if best_score >= 0.68:
         return best_company
 
     return "기타업체"
@@ -1057,6 +1211,63 @@ def duplicate_slide(prs, source_slide):
         )
 
     return new_slide
+
+
+def get_slide_index_by_id(prs, slide_id: int):
+    for idx, slide in enumerate(prs.slides):
+        if slide.slide_id == slide_id:
+            return idx
+    return None
+
+
+def delete_slide_by_index(prs, idx: int):
+    slide_id = prs.slides._sldIdLst[idx]
+    prs.part.drop_rel(slide_id.rId)
+    del prs.slides._sldIdLst[idx]
+
+
+def delete_slide_by_id(prs, slide_id: int):
+    idx = get_slide_index_by_id(prs, slide_id)
+    if idx is not None:
+        delete_slide_by_index(prs, idx)
+
+
+def move_slide_by_id(prs, slide_id: int, target_index: int):
+    idx = get_slide_index_by_id(prs, slide_id)
+    if idx is None:
+        return
+
+    sld_id = prs.slides._sldIdLst[idx]
+    prs.slides._sldIdLst.remove(sld_id)
+
+    target_index = max(0, min(target_index, len(prs.slides._sldIdLst)))
+    prs.slides._sldIdLst.insert(target_index, sld_id)
+
+
+def find_slide_index_by_any_text(prs, texts: List[str]):
+    for text in texts:
+        idx = find_slide_index_by_text(prs, text)
+        if idx is not None:
+            return idx
+    return None
+
+
+def clone_and_fill_bad_slides(prs, template_slide, bad_items: List[DailySlideData]) -> List[int]:
+    created_ids = []
+    for item in bad_items:
+        new_slide = duplicate_slide(prs, template_slide)
+        fill_daily_slide(new_slide, item, strict=False)
+        created_ids.append(new_slide.slide_id)
+    return created_ids
+
+
+def clone_and_fill_material_slides(prs, template_slide, material_items: List[MaterialWorkItem]) -> List[int]:
+    created_ids = []
+    for item in material_items:
+        new_slide = duplicate_slide(prs, template_slide)
+        insert_image_to_placeholder(new_slide, TIME_BOX_TEXT, item.image_path)
+        created_ids.append(new_slide.slide_id)
+    return created_ids
 
 
 def fill_slide_by_placeholders(slide, item: SlideData, strict: bool = True):
@@ -1229,13 +1440,35 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
     prs = Presentation(TEMPLATE_PPT)
 
+    if not slide_data_list:
+        out = io.BytesIO()
+        prs.save(out)
+        out.seek(0)
+        return out
+
+    if len(prs.slides) < 1:
+        raise ValueError("TBM 템플릿에 기준 슬라이드가 없습니다.")
+
+    base_slide = prs.slides[0]
+    filled_ids = []
+
     for i, item in enumerate(slide_data_list):
-        if i >= len(prs.slides):
-            break
+        if i == 0:
+            target_slide = base_slide
+        else:
+            target_slide = duplicate_slide(prs, base_slide)
+        fill_slide_by_placeholders(target_slide, item, strict=True)
+        filled_ids.append(target_slide.slide_id)
 
-        fill_slide_by_placeholders(prs.slides[i], item, strict=True)
-
-    delete_extra_slides(prs, len(slide_data_list))
+    # 원래 템플릿에 남아 있는 불필요한 슬라이드 제거. HOLD POINT가 있으면 보존.
+    keep_ids = set(filled_ids)
+    for idx in range(len(prs.slides) - 1, -1, -1):
+        slide = prs.slides[idx]
+        if slide.slide_id in keep_ids:
+            continue
+        if slide_has_text(slide, HOLD_POINT_TEXT):
+            continue
+        delete_slide_by_index(prs, idx)
 
     out = io.BytesIO()
     prs.save(out)
@@ -1269,19 +1502,59 @@ def build_daily_ppt(
     except Exception as e:
         raise ValueError(f"날씨 캡쳐 실패: {e}")
 
-    fill_material_slides(prs, material_items)
+    # 템플릿 기준 슬라이드 찾기
+    bad_template_idx = find_slide_index_by_text(prs, DAILY_PHOTO_BOX_TEXT)
+    material_template_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
 
-    start_slide_index = 3
+    if bad_items and bad_template_idx is None:
+        raise ValueError("부적합사진 기준 슬라이드(PHOTO_BOX_1)를 찾지 못했습니다.")
 
-    for i, item in enumerate(bad_items):
-        target_index = start_slide_index + i
+    if material_items and material_template_idx is None:
+        raise ValueError("자재입고/고위험 기준 슬라이드(TIME_BOX_1)를 찾지 못했습니다.")
 
-        if target_index >= len(prs.slides):
-            break
+    bad_template_slide = prs.slides[bad_template_idx] if bad_template_idx is not None else None
+    material_template_slide = prs.slides[material_template_idx] if material_template_idx is not None else None
 
-        fill_daily_slide(prs.slides[target_index], item, strict=False)
+    bad_template_id = bad_template_slide.slide_id if bad_template_slide is not None else None
+    material_template_id = material_template_slide.slide_id if material_template_slide is not None else None
 
-    # 일일안전회의 PPT 회색화면 방지를 위해 슬라이드 삭제를 하지 않음.
+    created_bad_ids = []
+    created_material_ids = []
+
+    if bad_template_slide is not None:
+        created_bad_ids = clone_and_fill_bad_slides(prs, bad_template_slide, bad_items)
+
+    if material_template_slide is not None:
+        created_material_ids = clone_and_fill_material_slides(prs, material_template_slide, material_items)
+
+    # 원본 기준 슬라이드는 빈 템플릿이므로 제거. 같은 슬라이드 중복 제거 방지.
+    for sid in sorted({x for x in [bad_template_id, material_template_id] if x is not None}, reverse=True):
+        delete_slide_by_id(prs, sid)
+
+    # 동적 슬라이드를 명일 작업내용 발표 앞에 배치.
+    # 명일 문구를 못 찾으면 HOLD POINT 앞, 그것도 못 찾으면 맨 뒤에 배치.
+    anchor_idx = find_slide_index_by_any_text(
+        prs,
+        [
+            "명일 작업내용 발표",
+            "명일작업내용발표",
+            "명일 작업내용",
+            "명일작업내용",
+        ]
+    )
+
+    if anchor_idx is None:
+        anchor_idx = find_slide_index_by_text(prs, HOLD_POINT_TEXT)
+
+    if anchor_idx is None:
+        anchor_idx = len(prs.slides)
+
+    desired_dynamic_ids = created_bad_ids + created_material_ids
+
+    insert_at = anchor_idx
+    for sid in desired_dynamic_ids:
+        move_slide_by_id(prs, sid, insert_at)
+        insert_at += 1
 
     out = io.BytesIO()
     prs.save(out)
