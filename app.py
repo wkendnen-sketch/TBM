@@ -48,7 +48,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template.pptx")
 DAILY_TEMPLATE_PPT = os.path.join(BASE_DIR, "templates", "sample_template2.pptx")
-TEMP_UPLOAD_DIR = os.path.join(BASE_DIR, "temp_upload")
+BAD_PHOTO_DIR = os.path.join(BASE_DIR, "bad_photo_upload")
+SHARED_NOTICE_FILE = os.path.join(BASE_DIR, "shared_notice.md")
+SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
@@ -70,9 +72,9 @@ DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
 TIME_BOX_TEXT = "TIME_BOX_1"
 HOLD_POINT_TEXT = "HOLD POINT"
 
-TEMP_UPLOAD_LIMIT_MB = 100
-TEMP_UPLOAD_LIMIT_BYTES = TEMP_UPLOAD_LIMIT_MB * 1024 * 1024
-TEMP_UPLOAD_EXPIRE_SECONDS = 24 * 60 * 60
+BAD_PHOTO_LIMIT_MB = 300
+BAD_PHOTO_LIMIT_BYTES = BAD_PHOTO_LIMIT_MB * 1024 * 1024
+BAD_PHOTO_EXPIRE_SECONDS = 24 * 60 * 60
 
 NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
 
@@ -212,7 +214,7 @@ def hide_streamlit_ui():
             gap: 0.35rem !important;
         }
 
-        .temp-small-button button {
+        .bad-photo-small-button button {
             min-height: 34px !important;
             padding: 0.25rem 0.4rem !important;
             font-size: 12px !important;
@@ -256,60 +258,60 @@ def format_size(size_bytes: int) -> str:
     return f"{size_bytes / 1024 / 1024:.1f}MB"
 
 
-def ensure_temp_upload_dir():
-    os.makedirs(TEMP_UPLOAD_DIR, exist_ok=True)
+def ensure_bad_photo_dir():
+    os.makedirs(BAD_PHOTO_DIR, exist_ok=True)
 
 
-def cleanup_old_temp_files():
-    ensure_temp_upload_dir()
+def cleanup_old_bad_photo_files():
+    ensure_bad_photo_dir()
     now = time.time()
 
-    for name in os.listdir(TEMP_UPLOAD_DIR):
-        path = os.path.join(TEMP_UPLOAD_DIR, name)
+    for name in os.listdir(BAD_PHOTO_DIR):
+        path = os.path.join(BAD_PHOTO_DIR, name)
         if os.path.isfile(path):
-            if now - os.path.getmtime(path) > TEMP_UPLOAD_EXPIRE_SECONDS:
+            if now - os.path.getmtime(path) > BAD_PHOTO_EXPIRE_SECONDS:
                 try:
                     os.remove(path)
                 except Exception:
                     pass
 
 
-def get_temp_upload_size() -> int:
-    ensure_temp_upload_dir()
+def get_bad_photo_size() -> int:
+    ensure_bad_photo_dir()
     total = 0
 
-    for name in os.listdir(TEMP_UPLOAD_DIR):
-        path = os.path.join(TEMP_UPLOAD_DIR, name)
+    for name in os.listdir(BAD_PHOTO_DIR):
+        path = os.path.join(BAD_PHOTO_DIR, name)
         if os.path.isfile(path):
             total += os.path.getsize(path)
 
     return total
 
 
-def save_temp_upload_file(uploaded_file):
-    ensure_temp_upload_dir()
+def save_bad_photo_file(uploaded_file):
+    ensure_bad_photo_dir()
 
     file_bytes = uploaded_file.getvalue()
     file_size = len(file_bytes)
     original_filename = safe_filename(uploaded_file.name)
 
-    for existing_name in os.listdir(TEMP_UPLOAD_DIR):
+    for existing_name in os.listdir(BAD_PHOTO_DIR):
         if existing_name.endswith(original_filename):
-            existing_path = os.path.join(TEMP_UPLOAD_DIR, existing_name)
+            existing_path = os.path.join(BAD_PHOTO_DIR, existing_name)
             if os.path.isfile(existing_path) and os.path.getsize(existing_path) == file_size:
                 return existing_path
 
-    current_size = get_temp_upload_size()
+    current_size = get_bad_photo_size()
 
-    if current_size + file_size > TEMP_UPLOAD_LIMIT_BYTES:
+    if current_size + file_size > BAD_PHOTO_LIMIT_BYTES:
         raise ValueError(
-            f"임시업로드 용량 초과: 현재 {format_size(current_size)} / "
-            f"추가 {format_size(file_size)} / 최대 {TEMP_UPLOAD_LIMIT_MB}MB"
+            f"부적합사진 용량 초과: 현재 {format_size(current_size)} / "
+            f"추가 {format_size(file_size)} / 최대 {BAD_PHOTO_LIMIT_MB}MB"
         )
 
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     save_name = f"{timestamp}_{original_filename}"
-    save_path = os.path.join(TEMP_UPLOAD_DIR, save_name)
+    save_path = os.path.join(BAD_PHOTO_DIR, save_name)
 
     with open(save_path, "wb") as f:
         f.write(file_bytes)
@@ -317,23 +319,23 @@ def save_temp_upload_file(uploaded_file):
     return save_path
 
 
-def save_generated_ppt_to_temp_upload(ppt_bytes: io.BytesIO, filename: str):
-    ensure_temp_upload_dir()
+def save_generated_ppt_to_bad_photo_storage(ppt_bytes: io.BytesIO, filename: str):
+    ensure_bad_photo_dir()
 
     ppt_bytes.seek(0)
     data = ppt_bytes.getvalue()
     file_size = len(data)
 
-    current_size = get_temp_upload_size()
+    current_size = get_bad_photo_size()
 
-    if current_size + file_size > TEMP_UPLOAD_LIMIT_BYTES:
+    if current_size + file_size > BAD_PHOTO_LIMIT_BYTES:
         ppt_bytes.seek(0)
         return False
 
     safe_name = safe_filename(filename)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     save_name = f"{timestamp}_{safe_name}"
-    save_path = os.path.join(TEMP_UPLOAD_DIR, save_name)
+    save_path = os.path.join(BAD_PHOTO_DIR, save_name)
 
     with open(save_path, "wb") as f:
         f.write(data)
@@ -342,14 +344,14 @@ def save_generated_ppt_to_temp_upload(ppt_bytes: io.BytesIO, filename: str):
     return True
 
 
-def make_temp_upload_zip():
-    ensure_temp_upload_dir()
+def make_bad_photo_zip():
+    ensure_bad_photo_dir()
 
     zip_buffer = io.BytesIO()
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        for name in sorted(os.listdir(TEMP_UPLOAD_DIR)):
-            path = os.path.join(TEMP_UPLOAD_DIR, name)
+        for name in sorted(os.listdir(BAD_PHOTO_DIR)):
+            path = os.path.join(BAD_PHOTO_DIR, name)
             if os.path.isfile(path):
                 zip_file.write(path, arcname=name)
 
@@ -357,12 +359,12 @@ def make_temp_upload_zip():
     return zip_buffer
 
 
-def delete_all_temp_uploads():
-    ensure_temp_upload_dir()
+def delete_all_bad_photo_files():
+    ensure_bad_photo_dir()
     deleted_count = 0
 
-    for name in os.listdir(TEMP_UPLOAD_DIR):
-        path = os.path.join(TEMP_UPLOAD_DIR, name)
+    for name in os.listdir(BAD_PHOTO_DIR):
+        path = os.path.join(BAD_PHOTO_DIR, name)
         if os.path.isfile(path):
             try:
                 os.remove(path)
@@ -406,21 +408,21 @@ def delete_file(path: str):
     return False
 
 
-def render_temp_upload():
-    cleanup_old_temp_files()
+def render_bad_photo_storage():
+    cleanup_old_bad_photo_files()
 
     files = []
-    ensure_temp_upload_dir()
+    ensure_bad_photo_dir()
 
-    for name in sorted(os.listdir(TEMP_UPLOAD_DIR), reverse=True):
-        path = os.path.join(TEMP_UPLOAD_DIR, name)
+    for name in sorted(os.listdir(BAD_PHOTO_DIR), reverse=True):
+        path = os.path.join(BAD_PHOTO_DIR, name)
         if os.path.isfile(path):
             files.append((name, path, os.path.getsize(path)))
 
     col_title, col_zip, col_delete = st.columns([5.2, 0.9, 0.9])
 
     with col_title:
-        used = get_temp_upload_size()
+        used = get_bad_photo_size()
         st.markdown(
             f"""
             <div style="
@@ -432,9 +434,9 @@ def render_temp_upload():
                 line-height:1.1;
                 min-height:34px;
             ">
-                <span style="font-size:18px; font-weight:700;">임시업로드</span>
+                <span style="font-size:18px; font-weight:700;">부적합사진</span>
                 <span style="font-size:13px; color:#666;">
-                    용량 {format_size(used)} / {TEMP_UPLOAD_LIMIT_MB}MB
+                    용량 {format_size(used)} / {BAD_PHOTO_LIMIT_MB}MB
                 </span>
             </div>
             """,
@@ -442,32 +444,32 @@ def render_temp_upload():
         )
 
     with col_zip:
-        st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
+        st.markdown("<div class='bad-photo-small-button'>", unsafe_allow_html=True)
         if files:
             st.download_button(
                 "ZIP",
-                data=make_temp_upload_zip(),
-                file_name="임시업로드_전체.zip",
+                data=make_bad_photo_zip(),
+                file_name="부적합사진_전체.zip",
                 mime="application/zip",
                 use_container_width=True,
-                key="temp_download_all_zip"
+                key="bad_photo_download_all_zip"
             )
         else:
-            st.button("ZIP", disabled=True, use_container_width=True, key="temp_download_all_zip_disabled")
+            st.button("ZIP", disabled=True, use_container_width=True, key="bad_photo_download_all_zip_disabled")
         st.markdown("</div>", unsafe_allow_html=True)
 
     with col_delete:
-        st.markdown("<div class='temp-small-button'>", unsafe_allow_html=True)
-        if st.button("전체삭제", use_container_width=True, key="temp_delete_all"):
-            delete_all_temp_uploads()
+        st.markdown("<div class='bad-photo-small-button'>", unsafe_allow_html=True)
+        if st.button("전체삭제", use_container_width=True, key="bad_photo_delete_all"):
+            delete_all_bad_photo_files()
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
     upload_files = st.file_uploader(
-        "임시업로드",
+        "부적합사진",
         accept_multiple_files=True,
         type=["jpg", "jpeg", "png", "webp", "heic", "heif", "mpo", "pdf", "pptx", "xlsx", "docx", "txt"],
-        key="daily_temp_upload_uploader"
+        key="daily_bad_photo_upload_uploader"
     )
 
     if upload_files:
@@ -475,7 +477,7 @@ def render_temp_upload():
 
         for file in upload_files:
             try:
-                save_temp_upload_file(file)
+                save_bad_photo_file(file)
                 uploaded_count += 1
             except Exception as e:
                 st.error(str(e))
@@ -507,17 +509,17 @@ def render_temp_upload():
                             data=f,
                             file_name=name,
                             use_container_width=True,
-                            key=f"temp_download_{name}_{idx}"
+                            key=f"bad_photo_download_{name}_{idx}"
                         )
 
                 with col3:
-                    if st.button("X", key=f"temp_delete_{name}_{idx}", use_container_width=True):
+                    if st.button("X", key=f"bad_photo_delete_{name}_{idx}", use_container_width=True):
                         if delete_file(path):
                             st.rerun()
                         else:
                             st.error("삭제 실패")
     else:
-        st.info("임시업로드 파일 없음.")
+        st.info("부적합사진 파일 없음.")
 
 
 def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
@@ -1631,7 +1633,7 @@ def render_tbm_input_area():
                 with st.spinner("PPT 생성 중..."):
                     ppt = build_ppt(slide_inputs)
 
-                save_generated_ppt_to_temp_upload(ppt, OUTPUT_PPT_NAME)
+                save_generated_ppt_to_bad_photo_storage(ppt, OUTPUT_PPT_NAME)
 
                 st.success("완료!")
                 st.download_button(
@@ -1751,7 +1753,7 @@ def render_daily_safety_meeting():
                 sorted_material_items = sort_material_work_items(material_items)
                 ppt = build_daily_ppt(bad_items, sorted_material_items)
 
-            save_generated_ppt_to_temp_upload(ppt, DAILY_OUTPUT_PPT_NAME)
+            save_generated_ppt_to_bad_photo_storage(ppt, DAILY_OUTPUT_PPT_NAME)
 
             st.success("완료!")
             st.download_button(
@@ -1774,8 +1776,89 @@ def render_daily_safety_meeting():
                         pass
 
     st.markdown("---")
-    render_temp_upload()
+    render_bad_photo_storage()
     st.markdown("---")
+
+
+def load_shared_notice() -> str:
+    try:
+        if os.path.exists(SHARED_NOTICE_FILE):
+            with open(SHARED_NOTICE_FILE, "r", encoding="utf-8") as f:
+                return f.read()
+    except Exception:
+        pass
+    return ""
+
+
+def save_shared_notice(text: str):
+    try:
+        with open(SHARED_NOTICE_FILE, "w", encoding="utf-8") as f:
+            f.write(text or "")
+
+        meta = {
+            "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        with open(SHARED_NOTICE_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        return True
+    except Exception:
+        return False
+
+
+def clear_shared_notice():
+    ok = save_shared_notice("")
+    return ok
+
+
+def load_shared_notice_saved_at() -> str:
+    try:
+        if os.path.exists(SHARED_NOTICE_META_FILE):
+            with open(SHARED_NOTICE_META_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return str(data.get("saved_at", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def render_shared_notice_board():
+    st.markdown("---")
+    st.markdown("## 공지사항 / 메모")
+
+    current_text = load_shared_notice()
+
+    notice_text = st.text_area(
+        "",
+        value=current_text,
+        height=800,
+        key="shared_notice_text_area",
+        placeholder="여기에 공지사항, 작업내용, 전달사항 등을 길게 붙여넣고 저장하세요."
+    )
+
+    col_save, col_delete, col_space = st.columns([0.8, 0.8, 5.4])
+
+    with col_save:
+        if st.button("저장", use_container_width=True, key="shared_notice_save_btn"):
+            if save_shared_notice(notice_text):
+                st.success("저장 완료")
+                st.rerun()
+            else:
+                st.error("저장 실패")
+
+    with col_delete:
+        if st.button("삭제", use_container_width=True, key="shared_notice_delete_btn"):
+            if clear_shared_notice():
+                st.success("삭제 완료")
+                st.rerun()
+            else:
+                st.error("삭제 실패")
+
+    saved_at = load_shared_notice_saved_at()
+    if saved_at:
+        st.caption(f"최종 저장: {saved_at}")
+    else:
+        st.caption("최종 저장: 없음")
 
 
 def main():
@@ -1792,6 +1875,8 @@ def main():
     st.markdown("## TBM 번역 PPT")
 
     render_tbm_input_area()
+
+    render_shared_notice_board()
 
 
 if __name__ == "__main__":
