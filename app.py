@@ -2110,7 +2110,7 @@ def render_shared_notice_board():
         value=current_text,
         height=260,
         key="shared_notice_text_area",
-        placeholder="여기에 공지사항, 작업내용, 전달사항 등을 길게 붙여넣고 저장하세요."
+        placeholder="공지사항/메모/안전사항 등."
     )
 
     col_save, col_delete, col_space = st.columns([0.8, 0.8, 5.4])
