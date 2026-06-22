@@ -4,6 +4,7 @@ import re
 import json
 import time
 import zipfile
+import gc
 import tempfile
 import subprocess
 from copy import deepcopy
@@ -56,6 +57,15 @@ BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
 APP_VERSION = "26년 5월 버전"
+
+# 대량 업로드/고용량 사진 안정화 설정
+TBM_IMAGE_MAX_SIZE = 1200
+TBM_IMAGE_QUALITY = 82
+DAILY_IMAGE_MAX_SIZE = 1400
+DAILY_IMAGE_QUALITY = 84
+MAX_TBM_FILES_SOFT_WARN = 35
+MAX_DAILY_FILES_SOFT_WARN = 35
+TRANSLATION_BATCH_SIZE = 15
 
 PHOTO_BOX_TEXT = "PHOTO_BOX"
 KO_BOX_TEXT = "1"
@@ -111,12 +121,14 @@ class SlideData:
     zh: str = ""
     vi: str = ""
     my: str = ""
+    orientation: str = ""
 
 
 @dataclass
 class DailySlideData:
     image_path: str
     text: str = ""
+    orientation: str = ""
 
 
 @dataclass
@@ -384,6 +396,11 @@ def make_thumbnail_bytes(path: str, max_size: int = 180):
         except Exception:
             pass
 
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
         if img.mode != "RGB":
             img = img.convert("RGB")
 
@@ -434,7 +451,7 @@ def render_bad_photo_storage():
                 line-height:1.1;
                 min-height:34px;
             ">
-                <span style="font-size:18px; font-weight:700;">부적합사진</span>
+                <span style="font-size:22px; font-weight:800; color:#006400;">부적합사진</span>
                 <span style="font-size:13px; color:#666;">
                     용량 {format_size(used)} / {BAD_PHOTO_LIMIT_MB}MB
                 </span>
@@ -522,7 +539,39 @@ def render_bad_photo_storage():
         st.info("부적합사진 파일 없음.")
 
 
-def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> str:
+def get_image_orientation(path: str) -> str:
+    """EXIF 방향 보정 후 실제 이미지 방향을 반환."""
+    try:
+        img = Image.open(path)
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+        w, h = img.size
+        if w > h:
+            return "landscape"
+        if h > w:
+            return "portrait"
+        return "square"
+    except Exception:
+        return "unknown"
+
+
+def convert_to_jpg(
+    input_path: str,
+    max_size: int = TBM_IMAGE_MAX_SIZE,
+    quality: int = TBM_IMAGE_QUALITY
+) -> str:
+    """
+    PPT 삽입용 JPG 변환.
+    - EXIF Orientation을 실제 픽셀 방향으로 반영한다.
+    - 가로/세로 방향을 임의 변경하지 않는다.
+    - 긴 변 기준으로 축소해 대량 사진/고용량 사진 생성 실패를 줄인다.
+    """
     try:
         img = Image.open(input_path)
 
@@ -531,7 +580,22 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
         except Exception:
             pass
 
-        if img.mode != "RGB":
+        original_orientation = get_image_orientation(input_path)
+
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+
+        if img.mode not in ("RGB", "L"):
+            # 투명 PNG/WEBP는 흰 배경으로 합성해서 PPT 호환성 확보
+            if "A" in img.getbands():
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                bg.paste(img, mask=img.getchannel("A"))
+                img = bg
+            else:
+                img = img.convert("RGB")
+        elif img.mode == "L":
             img = img.convert("RGB")
 
         width, height = img.size
@@ -539,15 +603,20 @@ def convert_to_jpg(input_path: str, max_size: int = 1600, quality: int = 88) -> 
 
         if longest > max_size:
             ratio = max_size / longest
-            new_width = int(width * ratio)
-            new_height = int(height * ratio)
+            new_width = max(1, int(width * ratio))
+            new_height = max(1, int(height * ratio))
             img = img.resize((new_width, new_height), Image.LANCZOS)
+
+        converted_orientation = "landscape" if img.width > img.height else "portrait" if img.height > img.width else "square"
+        if original_orientation in ("landscape", "portrait") and converted_orientation != original_orientation:
+            raise ValueError("이미지 변환 중 가로/세로 방향이 변경되었습니다.")
 
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
         output_path = tmp.name
         tmp.close()
 
-        img.save(output_path, format="JPEG", quality=quality, optimize=True)
+        img.save(output_path, format="JPEG", quality=quality, optimize=True, progressive=True)
+        img.close()
         return output_path
 
     except Exception as e:
@@ -635,6 +704,15 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
             raise ValueError("번역 결과에 zh, vi, my 키가 없습니다.")
 
     return parsed
+
+
+def translate_all_with_gpt(api_key: str, korean_list: List[str]):
+    """사진 수가 많을 때 API 응답 길이/시간초과를 줄이기 위해 나눠 번역."""
+    results = []
+    for start_idx in range(0, len(korean_list), TRANSLATION_BATCH_SIZE):
+        chunk = korean_list[start_idx:start_idx + TRANSLATION_BATCH_SIZE]
+        results.extend(translate_batch_with_gpt(api_key, chunk))
+    return results
 
 
 def iter_all_shapes(shapes):
@@ -1262,7 +1340,39 @@ def set_target_text(
 
 
 def add_picture_to_shape(slide, image_path, target_shape):
-    slide.shapes.add_picture(
+    """
+    PHOTO_BOX에 사진을 넣을 때 회전/왜곡 금지.
+    - 사진 비율 유지
+    - 박스는 꽉 채움(cover crop)
+    - crop만 적용하고 rotation은 항상 0
+    """
+    try:
+        img = Image.open(image_path)
+        try:
+            img = ImageOps.exif_transpose(img)
+        except Exception:
+            pass
+        img_w, img_h = img.size
+        img.close()
+    except Exception:
+        slide.shapes.add_picture(
+            image_path,
+            target_shape.left,
+            target_shape.top,
+            width=target_shape.width,
+            height=target_shape.height
+        )
+        return
+
+    if img_w <= 0 or img_h <= 0:
+        return
+
+    box_w = float(target_shape.width)
+    box_h = float(target_shape.height)
+    img_ratio = img_w / img_h
+    box_ratio = box_w / box_h
+
+    pic = slide.shapes.add_picture(
         image_path,
         target_shape.left,
         target_shape.top,
@@ -1270,8 +1380,36 @@ def add_picture_to_shape(slide, image_path, target_shape):
         height=target_shape.height
     )
 
+    try:
+        pic.rotation = 0
+    except Exception:
+        pass
+
+    # python-pptx crop 값은 0~1 비율. 가로/세로를 바꾸지 않고 초과분만 잘라낸다.
+    try:
+        if img_ratio > box_ratio:
+            crop = max(0.0, min(0.49, (1 - (box_ratio / img_ratio)) / 2))
+            pic.crop_left = crop
+            pic.crop_right = crop
+            pic.crop_top = 0
+            pic.crop_bottom = 0
+        elif img_ratio < box_ratio:
+            crop = max(0.0, min(0.49, (1 - (img_ratio / box_ratio)) / 2))
+            pic.crop_top = crop
+            pic.crop_bottom = crop
+            pic.crop_left = 0
+            pic.crop_right = 0
+    except Exception:
+        pass
+
+    return pic
+
 
 def duplicate_slide(prs, source_slide):
+    """
+    슬라이드 복제 시 도형 XML뿐 아니라 이미지 relationship도 같이 복사.
+    기존 deepcopy만 쓰면 국기 같은 그림이 2번째 슬라이드부터 깨질 수 있다.
+    """
     blank_slide_layout = prs.slide_layouts[6]
     new_slide = prs.slides.add_slide(blank_slide_layout)
 
@@ -1281,6 +1419,21 @@ def duplicate_slide(prs, source_slide):
             new_el,
             "p:extLst"
         )
+
+    # 이미지/차트 등 외부 관계 복사. notesSlide는 복사하지 않음.
+    try:
+        for rel in source_slide.part.rels.values():
+            if "notesSlide" in rel.reltype:
+                continue
+            try:
+                new_slide.part.rels.add_relationship(rel.reltype, rel._target, rel.rId)
+            except Exception:
+                try:
+                    new_slide.part.rels.add_relationship(rel.reltype, rel.target_part, rel.rId)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     return new_slide
 
@@ -1547,18 +1700,24 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     if len(prs.slides) < 1:
         raise ValueError("TBM 템플릿에 기준 슬라이드가 없습니다.")
 
-    base_slide = prs.slides[0]
+    # 국기 이미지 깨짐 방지: 템플릿에 이미 들어있는 슬라이드를 먼저 사용한다.
+    # 템플릿 수를 초과한 사진만 relationship 복사 방식으로 추가 복제한다.
     filled_ids = []
+    template_slide_count = len(prs.slides)
+    base_slide = prs.slides[0]
 
     for i, item in enumerate(slide_data_list):
-        if i == 0:
-            target_slide = base_slide
+        if i < template_slide_count:
+            target_slide = prs.slides[i]
         else:
             target_slide = duplicate_slide(prs, base_slide)
+
         fill_slide_by_placeholders(target_slide, item, strict=True)
         filled_ids.append(target_slide.slide_id)
 
-    # 원래 템플릿에 남아 있는 불필요한 슬라이드 제거. HOLD POINT가 있으면 보존.
+        if i % 10 == 0:
+            gc.collect()
+
     keep_ids = set(filled_ids)
     for idx in range(len(prs.slides) - 1, -1, -1):
         slide = prs.slides[idx]
@@ -1571,6 +1730,7 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     out = io.BytesIO()
     prs.save(out)
     out.seek(0)
+    gc.collect()
     return out
 
 
@@ -1677,6 +1837,9 @@ def render_tbm_input_area():
     )
 
     if files:
+        if len(files) > MAX_TBM_FILES_SOFT_WARN:
+            st.warning(f"사진이 {len(files)}장입니다. 고용량 사진은 자동 축소해서 처리하지만 생성 시간이 길어질 수 있습니다.")
+
         slide_inputs = []
         temp_paths = []
 
@@ -1691,7 +1854,7 @@ def render_tbm_input_area():
                     original_path = tmp.name
                     temp_paths.append(original_path)
 
-                jpg_path = convert_to_jpg(original_path)
+                jpg_path = convert_to_jpg(original_path, max_size=TBM_IMAGE_MAX_SIZE, quality=TBM_IMAGE_QUALITY)
                 temp_paths.append(jpg_path)
 
                 c1.image(jpg_path, width=150)
@@ -1703,7 +1866,7 @@ def render_tbm_input_area():
                     key=f"main_tbm_ko_{idx}"
                 )
 
-                slide_inputs.append(SlideData(jpg_path, ko_input, "", "", ""))
+                slide_inputs.append(SlideData(jpg_path, ko_input, "", "", "", get_image_orientation(jpg_path)))
 
         if st.button("PPT 생성", key="main_create_btn"):
             try:
@@ -1716,7 +1879,7 @@ def render_tbm_input_area():
                     if any(not x.strip() for x in ko_list):
                         raise ValueError("빈 한국어 문구가 있습니다. 모든 슬라이드 문구를 입력하세요.")
 
-                    translations = translate_batch_with_gpt(
+                    translations = translate_all_with_gpt(
                         st.secrets["GPT_API_KEY"],
                         ko_list
                     )
@@ -1753,7 +1916,14 @@ def render_tbm_input_area():
 
 
 def render_daily_safety_meeting():
-    st.markdown("## 일일안전회의")
+    st.markdown(
+        """
+        <h2 style="color:#d00000; font-weight:800; margin-top:0.35rem; margin-bottom:0.35rem;">
+            일일안전회의
+        </h2>
+        """,
+        unsafe_allow_html=True
+    )
 
     bad_files = st.file_uploader(
         "부적합사진",
@@ -1767,6 +1937,8 @@ def render_daily_safety_meeting():
     temp_paths = []
 
     if bad_files:
+        if len(bad_files) > MAX_DAILY_FILES_SOFT_WARN:
+            st.warning(f"부적합사진이 {len(bad_files)}장입니다. 자동 축소 처리하지만 생성 시간이 길어질 수 있습니다.")
         st.markdown("#### 부적합사진")
 
         for idx, f in enumerate(bad_files):
@@ -1777,7 +1949,7 @@ def render_daily_safety_meeting():
                 original_path = tmp.name
                 temp_paths.append(original_path)
 
-            jpg_path = convert_to_jpg(original_path)
+            jpg_path = convert_to_jpg(original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
             temp_paths.append(jpg_path)
 
             with st.expander(f"부적합사진 #{idx + 1}", expanded=True):
@@ -1794,7 +1966,7 @@ def render_daily_safety_meeting():
                         key=f"daily_bad_text_{idx}"
                     )
 
-            bad_items.append(DailySlideData(jpg_path, text_value))
+            bad_items.append(DailySlideData(jpg_path, text_value, get_image_orientation(jpg_path)))
 
     material_files = st.file_uploader(
         "자재입고 및 고위험작업",
@@ -1804,6 +1976,8 @@ def render_daily_safety_meeting():
     )
 
     if material_files:
+        if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
+            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. OCR 때문에 시간이 오래 걸릴 수 있습니다.")
         st.markdown("#### 자재입고 및 고위험작업")
 
         for idx, f in enumerate(material_files):
@@ -1814,7 +1988,7 @@ def render_daily_safety_meeting():
                 material_original_path = tmp.name
                 temp_paths.append(material_original_path)
 
-            material_jpg_path = convert_to_jpg(material_original_path)
+            material_jpg_path = convert_to_jpg(material_original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
             temp_paths.append(material_jpg_path)
 
             item = classify_material_work_image(
@@ -1920,7 +2094,14 @@ def load_shared_notice_saved_at() -> str:
 
 def render_shared_notice_board():
     st.markdown("---")
-    st.markdown("## 공지사항 / 메모")
+    st.markdown(
+        """
+        <h2 style="font-size:1.35em; font-weight:700; margin-top:0.35rem; margin-bottom:0.35rem;">
+            공지사항 / 메모
+        </h2>
+        """,
+        unsafe_allow_html=True
+    )
 
     current_text = load_shared_notice()
 
@@ -1968,7 +2149,14 @@ def main():
     render_daily_safety_meeting()
 
     st.markdown("---")
-    st.markdown("## TBM 번역 PPT")
+    st.markdown(
+        """
+        <h2 style="color:#0057d9; font-weight:800; margin-top:0.35rem; margin-bottom:0.35rem;">
+            TBM 번역 PPT
+        </h2>
+        """,
+        unsafe_allow_html=True
+    )
 
     render_tbm_input_area()
 
