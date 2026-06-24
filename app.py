@@ -485,8 +485,8 @@ def render_bad_photo_storage():
     upload_files = st.file_uploader(
         "부적합사진",
         accept_multiple_files=True,
-        type=["jpg", "jpeg", "png", "webp", "heic", "heif", "mpo", "pdf", "pptx", "xlsx", "docx", "txt"],
-        key="daily_bad_photo_upload_uploader"
+        key="daily_bad_photo_upload_uploader",
+        help="모든 형식 업로드 가능"
     )
 
     if upload_files:
