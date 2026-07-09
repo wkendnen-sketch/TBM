@@ -451,7 +451,7 @@ def render_bad_photo_storage():
                 line-height:1.1;
                 min-height:34px;
             ">
-                <span style="font-size:22px; font-weight:800; color:#006400;">부적합사진</span>
+                <span style="font-size:48px; font-weight:800; color:#006400;">부적합사진</span>
                 <span style="font-size:13px; color:#666;">
                     용량 {format_size(used)} / {BAD_PHOTO_LIMIT_MB}MB
                 </span>
@@ -483,10 +483,11 @@ def render_bad_photo_storage():
         st.markdown("</div>", unsafe_allow_html=True)
 
     upload_files = st.file_uploader(
-        "부적합사진",
+        "부적합사진 파일 업로드",
         accept_multiple_files=True,
+        type=None,  # 확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 업로드 가능
         key="daily_bad_photo_upload_uploader",
-        help="모든 형식 업로드 가능"
+        help="확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 거의 모든 파일 업로드 가능"
     )
 
     if upload_files:
@@ -515,6 +516,7 @@ def render_bad_photo_storage():
                         st.image(thumb, width=110)
                     else:
                         st.write("파일")
+                        st.caption("미리보기 불가")
 
                 with col2:
                     st.caption(name)
@@ -1918,7 +1920,7 @@ def render_tbm_input_area():
 def render_daily_safety_meeting():
     st.markdown(
         """
-        <h2 style="color:#d00000; font-weight:800; margin-top:0.35rem; margin-bottom:0.35rem;">
+        <h2 style="color:#d00000; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">
             일일안전회의
         </h2>
         """,
@@ -2151,7 +2153,7 @@ def main():
     st.markdown("---")
     st.markdown(
         """
-        <h2 style="color:#0057d9; font-weight:800; margin-top:0.35rem; margin-bottom:0.35rem;">
+        <h2 style="color:#0057d9; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">
             TBM 번역 PPT
         </h2>
         """,
