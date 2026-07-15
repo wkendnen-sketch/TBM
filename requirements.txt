@@ -4,3 +4,5 @@ Pillow
 google-genai
 playwright
 pillow-heif
+pytesseract
+openpyxl
