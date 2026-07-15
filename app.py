@@ -10,7 +10,7 @@ import subprocess
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 
 import requests
@@ -41,6 +41,11 @@ try:
     from paddleocr import PaddleOCR
 except Exception:
     PaddleOCR = None
+
+try:
+    import openpyxl
+except Exception:
+    openpyxl = None
 
 _PADDLE_OCR = None
 
@@ -2140,6 +2145,224 @@ def render_shared_notice_board():
         st.caption("최종 저장: 없음")
 
 
+# ============================================================
+# 체감온도 측정 기록
+# ============================================================
+
+HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")
+HEAT_LOG_COLUMNS = ["측정일자", "측정시간", "기온", "습도", "체감온도", "측정자", "측정위치", "비고"]
+HEAT_LOG_GAP_HOURS = 2
+
+
+def parse_heat_index_fields(text: str) -> dict:
+    """OCR 원문에서 체감온도 측정 항목을 추출."""
+    raw = str(text or "")
+
+    def find(pattern, default=""):
+        m = re.search(pattern, raw)
+        return normalize_ocr_text(m.group(1)) if m else default
+
+    date = find(r"(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})")
+    time_ = find(r"(\d{1,2}\s*[:시]\s*\d{2})")
+    temp = find(r"기온[^\d\-]{0,5}(-?\d+\.?\d*)")
+    humidity = find(r"습도[^\d]{0,5}(\d+\.?\d*)")
+    feels = find(r"체감\s*(?:온도)?[^\d\-]{0,5}(-?\d+\.?\d*)")
+    measurer = find(r"측정자[:\s]*([^\n,]{1,20})")
+    location = find(r"측정\s*(?:위치|장소)[:\s]*([^\n,]{1,20})")
+
+    time_ = time_.replace("시", ":").replace(" ", "")
+
+    return {
+        "측정일자": date,
+        "측정시간": time_,
+        "기온": temp,
+        "습도": humidity,
+        "체감온도": feels,
+        "측정자": measurer,
+        "측정위치": location,
+    }
+
+
+def parse_heat_datetime(date_str: str, time_str: str) -> Optional[datetime]:
+    date_str = re.sub(r"[./]", "-", str(date_str or "").strip())
+    time_str = str(time_str or "").strip()
+    if re.match(r"^\d{1}:\d{2}$", time_str):
+        time_str = "0" + time_str
+    try:
+        return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+    except Exception:
+        return None
+
+
+def find_matching_sheet_name(wb, location: str, threshold: float = 0.75) -> str:
+    """OCR로 추출한 측정위치와 가장 비슷한 기존 시트를 찾는다. 없으면 새 이름 사용."""
+    location = (location or "미지정").strip()[:31] or "미지정"
+    loc_norm = normalize_for_match(location)
+
+    best_name = re.sub(r'[\\/*?:\[\]]', "_", location)[:31]
+    best_score = 0.0
+
+    for name in wb.sheetnames:
+        score = SequenceMatcher(None, normalize_for_match(name), loc_norm).ratio()
+        if score > best_score:
+            best_score = score
+            best_name = name
+
+    if best_score >= threshold:
+        return best_name
+
+    return best_name if best_score == 0.0 else re.sub(r'[\\/*?:\[\]]', "_", location)[:31]
+
+
+def load_heat_log_workbook():
+    if os.path.exists(HEAT_LOG_FILE):
+        try:
+            return openpyxl.load_workbook(HEAT_LOG_FILE)
+        except Exception:
+            pass
+    return openpyxl.Workbook()
+
+
+def get_last_entry_datetime(ws) -> Optional[datetime]:
+    if ws.max_row < 2:
+        return None
+    last_row = ws[ws.max_row]
+    return parse_heat_datetime(last_row[0].value, last_row[1].value)
+
+
+def save_heat_log_row(location: str, row: dict) -> str:
+    """엑셀 파일에 측정 기록 1건을 저장하고 저장된 시트명을 반환."""
+    wb = load_heat_log_workbook()
+
+    # 최초 저장 시 openpyxl 기본 빈 시트 제거
+    if "Sheet" in wb.sheetnames and len(wb.sheetnames) == 1 and wb["Sheet"].max_row < 2:
+        wb.remove(wb["Sheet"])
+
+    sheet_name = find_matching_sheet_name(wb, location)
+
+    if sheet_name not in wb.sheetnames:
+        ws = wb.create_sheet(title=sheet_name)
+        ws.append(HEAT_LOG_COLUMNS)
+    else:
+        ws = wb[sheet_name]
+
+    gap_note = ""
+    last_dt = get_last_entry_datetime(ws)
+    new_dt = parse_heat_datetime(row["측정일자"], row["측정시간"])
+    if new_dt and last_dt and (new_dt - last_dt) > timedelta(hours=HEAT_LOG_GAP_HOURS):
+        gap_note = f"간격초과({new_dt - last_dt} 경과, 측정 누락 가능성)"
+
+    ws.append([
+        row["측정일자"], row["측정시간"], row["기온"], row["습도"],
+        row["체감온도"], row["측정자"], row["측정위치"], gap_note
+    ])
+
+    wb.save(HEAT_LOG_FILE)
+    return sheet_name
+
+
+def render_heat_index_log():
+    st.markdown("---")
+    st.markdown(
+        """
+        <h2 style="color:#e8590c; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">
+            체감온도 측정 기록
+        </h2>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if openpyxl is None:
+        st.error("openpyxl 패키지가 설치되어 있지 않습니다. requirements.txt에 openpyxl을 추가해주세요.")
+        return
+
+    heat_files = st.file_uploader(
+        "측정 사진 업로드",
+        accept_multiple_files=True,
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif"],
+        key="heat_index_uploader"
+    )
+
+    if heat_files:
+        for idx, f in enumerate(heat_files):
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getbuffer())
+                original_path = tmp.name
+
+            with st.spinner(f"{f.name} 분석 중..."):
+                ocr_text = extract_ocr_text(original_path)
+            parsed = parse_heat_index_fields(ocr_text)
+
+            with st.expander(f"측정 사진 #{idx + 1} - {f.name}", expanded=True):
+                c1, c2 = st.columns([1, 2])
+
+                with c1:
+                    st.image(original_path, width=200)
+
+                with c2:
+                    date = st.text_input("측정일자", parsed["측정일자"], key=f"heat_date_{idx}")
+                    time_ = st.text_input("측정시간", parsed["측정시간"], key=f"heat_time_{idx}")
+                    temp = st.text_input("기온", parsed["기온"], key=f"heat_temp_{idx}")
+                    humidity = st.text_input("습도", parsed["습도"], key=f"heat_hum_{idx}")
+                    feels = st.text_input("체감온도", parsed["체감온도"], key=f"heat_feels_{idx}")
+                    measurer = st.text_input("측정자", parsed["측정자"], key=f"heat_person_{idx}")
+                    location = st.text_input("측정위치", parsed["측정위치"], key=f"heat_loc_{idx}")
+
+                with st.expander("OCR 원문 보기"):
+                    st.text(ocr_text or "(인식된 텍스트 없음)")
+
+                if st.button("이 기록 저장", key=f"heat_save_{idx}"):
+                    if not location.strip() or not date.strip() or not time_.strip():
+                        st.error("측정일자 / 측정시간 / 측정위치는 비워둘 수 없습니다. 확인 후 다시 저장해주세요.")
+                    else:
+                        row = {
+                            "측정일자": date.strip(), "측정시간": time_.strip(),
+                            "기온": temp.strip(), "습도": humidity.strip(),
+                            "체감온도": feels.strip(), "측정자": measurer.strip(),
+                            "측정위치": location.strip(),
+                        }
+                        try:
+                            saved_sheet = save_heat_log_row(location.strip(), row)
+                            st.success(f"'{saved_sheet}' 기록에 저장되었습니다.")
+                        except Exception as e:
+                            st.error(f"저장 실패: {e}")
+
+            if os.path.exists(original_path):
+                try:
+                    os.remove(original_path)
+                except Exception:
+                    pass
+
+    st.markdown("#### 누적 기록")
+    if os.path.exists(HEAT_LOG_FILE):
+        wb = load_heat_log_workbook()
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            if ws.max_row < 2:
+                continue
+            rows = list(ws.iter_rows(values_only=True))
+            header, data_rows = rows[0], rows[1:]
+            st.caption(f"📍 {sheet_name} ({len(data_rows)}건)")
+            st.dataframe(
+                [dict(zip(header, r)) for r in data_rows],
+                use_container_width=True,
+                hide_index=True
+            )
+
+        with open(HEAT_LOG_FILE, "rb") as f:
+            st.download_button(
+                "체감온도 기록 엑셀 다운로드",
+                f,
+                file_name="heat_index_log.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="heat_log_download_btn"
+            )
+    else:
+        st.info("아직 저장된 측정 기록이 없습니다.")
+
+
 def main():
     install_playwright_browser()
 
@@ -2163,6 +2386,8 @@ def main():
     render_tbm_input_area()
 
     render_shared_notice_board()
+
+    render_heat_index_log()
 
 
 if __name__ == "__main__":
