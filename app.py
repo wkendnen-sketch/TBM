@@ -3,11 +3,13 @@ import io
 import re
 import json
 import time
+import math
+import base64
 import zipfile
 import gc
 import tempfile
 import subprocess
-from copy import deepcopy
+from copy import deepcopy, copy
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
 from datetime import datetime, timedelta
@@ -2146,119 +2148,320 @@ def render_shared_notice_board():
 
 
 # ============================================================
-# 체감온도 측정 기록
+# 체감온도 측정 기록 (업로드된 관리대장 템플릿 기반, GPT Vision OCR)
 # ============================================================
+#
+# 필요 설정:
+#   1) 저장소의 templates/ 폴더에 heat_index_template.xlsx 추가
+#   2) Secrets에 GPT_API_KEY 필요 (기존 번역 기능과 동일한 키 재사용)
+#
+# 동작 방식:
+#   - 사진 1장 = 카카오톡 캡쳐 등, 측정 기록이 여러 건 섞여있을 수 있음
+#     → GPT-4o-mini Vision으로 사진 1장에서 기록 여러 건을 한번에 구조화 추출
+#   - 시트 1개 = 특정 "측정장소 + 날짜" 하루치 (템플릿 그대로 복제, NO 1~9 슬롯)
+#   - 같은 장소/날짜는 표기가 조금 달라도 같은 시트로 병합
+#   - "2. 조치사항" 섹션은 템플릿 내용을 그대로 유지 (사진과 무관하므로 손대지 않음)
+#   - 사진에 체감온도가 안 보이면, 기온·습도로 기상청 공식 체감온도 산출식을 이용해 계산
+#     (표를 보고 어림잡지 않음 — 실측된 기온·습도로부터 결정적으로 계산되는 값이라 지어내는 것이 아님)
+#   - 측정이 2시간 넘게 비면 비고란에 "간격초과" 메모만 남기고, 값은 절대 지어내지 않음
+#   - 사진을 올리면 즉시(버튼 클릭 없이) 자동 저장 → 페이지를 나가도 작업이 유실되지 않음
+#     이후 확인해서 값이 틀렸으면 "수정 반영"으로 같은 칸을 덮어씀 (중복 저장 안 됨)
 
+HEAT_TEMPLATE_XLSX = os.path.join(BASE_DIR, "templates", "heat_index_template.xlsx")
 HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")
-HEAT_LOG_COLUMNS = ["측정일자", "측정시간", "기온", "습도", "체감온도", "측정자", "측정위치", "비고"]
-HEAT_LOG_GAP_HOURS = 2
+HEAT_LOG_GAP_MINUTES = 120
 
 
-def parse_heat_index_fields(text: str) -> dict:
-    """OCR 원문에서 체감온도 측정 항목을 추출."""
-    raw = str(text or "")
+def calc_heat_index(Ta: float, RH: float) -> float:
+    """기상자료개방포털 여름철 체감온도 공식(2022.6.2 개정판).
+    습구온도는 Stull(2011) 근사식으로 추정.
+    체감온도 = -0.2442 + 0.55399Tw + 0.45535Ta - 0.0022Tw^2 + 0.00278TwTa + 3.0
+    """
+    Tw = (Ta * math.atan(0.151977 * (RH + 8.313659) ** 0.5)
+          + math.atan(Ta + RH)
+          - math.atan(RH - 1.676331)
+          + 0.00391838 * (RH ** 1.5) * math.atan(0.023101 * RH)
+          - 4.686035)
+    hi = -0.2442 + 0.55399 * Tw + 0.45535 * Ta - 0.0022 * (Tw ** 2) + 0.00278 * Tw * Ta + 3.0
+    return round(hi, 1)
 
-    def find(pattern, default=""):
-        m = re.search(pattern, raw)
-        return normalize_ocr_text(m.group(1)) if m else default
 
-    date = find(r"(\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2})")
-    time_ = find(r"(\d{1,2}\s*[:시]\s*\d{2})")
-    temp = find(r"기온[^\d\-]{0,5}(-?\d+\.?\d*)")
-    humidity = find(r"습도[^\d]{0,5}(\d+\.?\d*)")
-    feels = find(r"체감\s*(?:온도)?[^\d\-]{0,5}(-?\d+\.?\d*)")
-    measurer = find(r"측정자[:\s]*([^\n,]{1,20})")
-    location = find(r"측정\s*(?:위치|장소)[:\s]*([^\n,]{1,20})")
+def image_to_data_url(image_path: str, max_dim: int = 1600, quality: int = 85) -> str:
+    """GPT Vision 전송용으로 이미지를 적당히 축소 압축 후 base64 data URL로 변환."""
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
 
-    time_ = time_.replace("시", ":").replace(" ", "")
+    longest = max(img.width, img.height)
+    if longest > max_dim:
+        scale = max_dim / longest
+        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
 
-    return {
-        "측정일자": date,
-        "측정시간": time_,
-        "기온": temp,
-        "습도": humidity,
-        "체감온도": feels,
-        "측정자": measurer,
-        "측정위치": location,
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{b64}"
+
+
+HEAT_EXTRACT_PROMPT = """이 이미지는 건설현장 체감온도 측정 기록 사진이다. 카카오톡 대화 캡쳐처럼
+서로 다른 위치/시각의 측정 기록이 한 장에 여러 건 섞여 있을 수 있다. 각 기록을 구분해서 각각 하나의
+JSON 객체로 만들어라.
+
+각 기록에서 다음을 추출하라:
+- 측정자: 말풍선 위에 표시된 카카오톡 발신자 이름 등 측정한 사람 이름
+- 측정위치: 사진 캡션이나 근처 텍스트에 명시된 현장/구역/동 이름
+- 측정일자: 이미지에 날짜가 명시적으로 보이는 경우에만 YYYY-MM-DD 형식으로. 안 보이면 빈 문자열.
+- 측정시간: 말풍선 옆 시각(오전/오후 표기 가능)을 24시간제 HH:MM으로 변환. 안 보이면 빈 문자열.
+- 기온: 온습도계 화면에 표시된 숫자만 (단위 제외)
+- 습도: 온습도계 화면에 표시된 숫자만 (단위 제외)
+- 체감온도: 계산기 화면 등에 명확히 숫자로 표시된 경우에만. 안 보이면 빈 문자열 (직접 계산하거나 추측하지 마라).
+
+중요: 불확실하거나 이미지에서 명확히 보이지 않는 값은 빈 문자열("")로 남겨라. 절대 추측해서 채우지 마라.
+
+아래 JSON 배열 형식으로만 출력하라. 설명, 코드블록, 다른 텍스트를 절대 포함하지 마라.
+[
+  {"측정자":"", "측정위치":"", "측정일자":"", "측정시간":"", "기온":"", "습도":"", "체감온도":""}
+]
+
+기록이 하나도 없으면 빈 배열 []만 출력하라."""
+
+
+def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
+    """사진 1장에서 체감온도 측정 기록 N건을 GPT-4o-mini Vision으로 구조화 추출."""
+    url = "https://api.openai.com/v1/responses"
+    data_url = image_to_data_url(image_path)
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": HEAT_EXTRACT_PROMPT},
+                    {"type": "input_image", "image_url": data_url}
+                ]
+            }
+        ]
     }
 
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+    if resp.status_code != 200:
+        raise Exception(f"API Error: {resp.text}")
 
-def parse_heat_datetime(date_str: str, time_str: str) -> Optional[datetime]:
-    date_str = re.sub(r"[./]", "-", str(date_str or "").strip())
-    time_str = str(time_str or "").strip()
-    if re.match(r"^\d{1}:\d{2}$", time_str):
-        time_str = "0" + time_str
+    data = resp.json()
+    text = ""
+    if "output_text" in data and data["output_text"]:
+        text = data["output_text"]
+    else:
+        for item in data.get("output", []):
+            for c in item.get("content", []):
+                if c.get("type") == "output_text":
+                    text += c.get("text", "")
+
+    return parse_heat_gpt_response(text)
+
+
+def parse_heat_gpt_response(text: str) -> List[dict]:
+    """GPT 응답 텍스트를 JSON 배열로 파싱 (코드블록/잡텍스트 방어)."""
+    cleaned = text.replace("```json", "").replace("```", "").strip()
     try:
-        return datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        parsed = json.loads(cleaned)
+    except Exception:
+        cleaned = re.sub(r'[\x00-\x1F]+', ' ', cleaned)
+        m = re.search(r'\[.*\]', cleaned, re.S)
+        parsed = json.loads(m.group(0)) if m else []
+
+    if not isinstance(parsed, list):
+        parsed = [parsed]
+
+    records = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        record = {
+            "측정자": str(item.get("측정자", "") or "").strip(),
+            "측정위치": str(item.get("측정위치", "") or "").strip(),
+            "측정일자": str(item.get("측정일자", "") or "").strip(),
+            "측정시간": str(item.get("측정시간", "") or "").strip(),
+            "기온": str(item.get("기온", "") or "").strip(),
+            "습도": str(item.get("습도", "") or "").strip(),
+            "체감온도": str(item.get("체감온도", "") or "").strip(),
+        }
+        records.append(record)
+    return records
+
+
+def load_heat_template_sheet():
+    """템플릿 파일을 열어 원본 시트를 반환. 없으면 None."""
+    if not os.path.exists(HEAT_TEMPLATE_XLSX):
+        return None
+    try:
+        wb = openpyxl.load_workbook(HEAT_TEMPLATE_XLSX)
+        return wb[wb.sheetnames[0]]
     except Exception:
         return None
 
 
-def find_matching_sheet_name(wb, location: str, threshold: float = 0.75) -> str:
-    """OCR로 추출한 측정위치와 가장 비슷한 기존 시트를 찾는다. 없으면 새 이름 사용."""
-    location = (location or "미지정").strip()[:31] or "미지정"
-    loc_norm = normalize_for_match(location)
+def copy_template_sheet(template_ws, target_wb, new_title: str):
+    """템플릿 시트를 다른 워크북으로 값+서식+병합+열너비까지 복제."""
+    new_ws = target_wb.create_sheet(title=new_title[:31])
 
-    best_name = re.sub(r'[\\/*?:\[\]]', "_", location)[:31]
-    best_score = 0.0
+    for row in template_ws.iter_rows():
+        for cell in row:
+            new_cell = new_ws.cell(row=cell.row, column=cell.column, value=cell.value)
+            if cell.has_style:
+                new_cell.font = copy(cell.font)
+                new_cell.border = copy(cell.border)
+                new_cell.fill = copy(cell.fill)
+                new_cell.number_format = cell.number_format
+                new_cell.protection = copy(cell.protection)
+                new_cell.alignment = copy(cell.alignment)
 
+    for mc in template_ws.merged_cells.ranges:
+        new_ws.merge_cells(str(mc))
+
+    for col_letter, dim in template_ws.column_dimensions.items():
+        new_ws.column_dimensions[col_letter].width = dim.width
+
+    for row_idx, dim in template_ws.row_dimensions.items():
+        new_ws.row_dimensions[row_idx].height = dim.height
+
+    return new_ws
+
+
+def date_to_mmdd(date_str: str) -> str:
+    d = re.sub(r"[./]", "-", str(date_str or "").strip())
+    m = re.match(r"(\d{4})-(\d{1,2})-(\d{1,2})", d)
+    if m:
+        return f"{int(m.group(2)):02d}{int(m.group(3)):02d}"
+    digits = re.sub(r"\D", "", d)
+    return digits[-4:] if len(digits) >= 4 else "0000"
+
+
+def get_or_create_heat_sheet(wb, template_ws, location: str, date_str: str):
+    """같은 (장소, 날짜)면 기존 시트 재사용, 표기 차이는 유사도로 병합. 없으면 템플릿을 복제해 새로 생성."""
+    mmdd = date_to_mmdd(date_str)
+
+    candidates = []
     for name in wb.sheetnames:
-        score = SequenceMatcher(None, normalize_for_match(name), loc_norm).ratio()
+        m = re.match(r"^(.*)_(\d{4})(?:_\d+)?$", name)
+        if m and m.group(2) == mmdd:
+            candidates.append((name, m.group(1)))
+
+    loc_norm = normalize_for_match(location)
+    best_name, best_score = None, 0.0
+    for name, prefix in candidates:
+        score = SequenceMatcher(None, normalize_for_match(prefix), loc_norm).ratio()
         if score > best_score:
             best_score = score
             best_name = name
 
-    if best_score >= threshold:
-        return best_name
+    if best_score >= 0.75:
+        return wb[best_name]
 
-    return best_name if best_score == 0.0 else re.sub(r'[\\/*?:\[\]]', "_", location)[:31]
+    safe_loc = re.sub(r'[\\/*?:\[\]]', "_", location).strip()[:20] or "미지정"
+    base_name = f"{safe_loc}_{mmdd}"[:31]
+    new_name = base_name
+    i = 2
+    while new_name in wb.sheetnames:
+        new_name = f"{base_name}_{i}"[:31]
+        i += 1
+
+    ws = copy_template_sheet(template_ws, wb, new_name)
+
+    orig_b3 = template_ws["B3"].value or ""
+    new_b3 = re.sub(r"(측정일자\s*:)\s*", rf"\1 {date_str}   ", orig_b3, count=1)
+    new_b3 = re.sub(r"(측정장소\s*:)\s*", rf"\1 {location}   ", new_b3, count=1)
+    ws["B3"] = new_b3
+
+    return ws
 
 
-def load_heat_log_workbook():
-    if os.path.exists(HEAT_LOG_FILE):
-        try:
-            return openpyxl.load_workbook(HEAT_LOG_FILE)
-        except Exception:
-            pass
-    return openpyxl.Workbook()
+def find_empty_heat_slot(ws, template_ws) -> Optional[int]:
+    """NO 1~9(6~14행) 중 아직 안 쓴 첫 번째 칸을 찾음. 다 찼으면 None."""
+    placeholder = template_ws["D6"].value
+    for row in range(6, 15):
+        val = ws.cell(row=row, column=4).value
+        if val == placeholder or val in (None, ""):
+            return row
+    return None
 
 
-def get_last_entry_datetime(ws) -> Optional[datetime]:
-    if ws.max_row < 2:
+def heat_time_to_minutes(t) -> Optional[int]:
+    m = re.match(r"^(\d{1,2}):(\d{2})$", str(t or "").strip())
+    if not m:
         return None
-    last_row = ws[ws.max_row]
-    return parse_heat_datetime(last_row[0].value, last_row[1].value)
+    return int(m.group(1)) * 60 + int(m.group(2))
 
 
-def save_heat_log_row(location: str, row: dict) -> str:
-    """엑셀 파일에 측정 기록 1건을 저장하고 저장된 시트명을 반환."""
-    wb = load_heat_log_workbook()
+def _to_number(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return value
 
-    # 최초 저장 시 openpyxl 기본 빈 시트 제거
-    if "Sheet" in wb.sheetnames and len(wb.sheetnames) == 1 and wb["Sheet"].max_row < 2:
-        wb.remove(wb["Sheet"])
 
-    sheet_name = find_matching_sheet_name(wb, location)
+def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str]:
+    """측정 1건을 템플릿 기반 워크북에 저장. (시트명, 저장된 행번호, 간격초과 메모) 반환."""
+    template_ws = load_heat_template_sheet()
+    if template_ws is None:
+        raise ValueError(
+            f"템플릿 파일을 찾을 수 없습니다: {HEAT_TEMPLATE_XLSX} "
+            "(templates 폴더에 heat_index_template.xlsx를 추가해주세요)"
+        )
 
-    if sheet_name not in wb.sheetnames:
-        ws = wb.create_sheet(title=sheet_name)
-        ws.append(HEAT_LOG_COLUMNS)
+    if os.path.exists(HEAT_LOG_FILE):
+        wb = openpyxl.load_workbook(HEAT_LOG_FILE)
     else:
-        ws = wb[sheet_name]
+        wb = openpyxl.Workbook()
+        wb.remove(wb.active)
+
+    ws = get_or_create_heat_sheet(wb, template_ws, location, row["측정일자"])
+
+    target_row = find_empty_heat_slot(ws, template_ws)
+    if target_row is None:
+        raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
     gap_note = ""
-    last_dt = get_last_entry_datetime(ws)
-    new_dt = parse_heat_datetime(row["측정일자"], row["측정시간"])
-    if new_dt and last_dt and (new_dt - last_dt) > timedelta(hours=HEAT_LOG_GAP_HOURS):
-        gap_note = f"간격초과({new_dt - last_dt} 경과, 측정 누락 가능성)"
+    new_min = heat_time_to_minutes(row["측정시간"])
+    if target_row > 6 and new_min is not None:
+        for prev_row in range(target_row - 1, 5, -1):
+            prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
+            if prev_min is not None:
+                if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
+                    gap_note = f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)"
+                break
 
-    ws.append([
-        row["측정일자"], row["측정시간"], row["기온"], row["습도"],
-        row["체감온도"], row["측정자"], row["측정위치"], gap_note
-    ])
+    ws.cell(row=target_row, column=3, value=row["측정시간"])
+    ws.cell(row=target_row, column=4, value=_to_number(row["기온"]))
+    ws.cell(row=target_row, column=5, value=_to_number(row["습도"]))
+    ws.cell(row=target_row, column=6, value=_to_number(row["체감온도"]))
+    ws.cell(row=target_row, column=7, value=row["측정자"])
+    ws.cell(row=target_row, column=8, value=gap_note)
 
     wb.save(HEAT_LOG_FILE)
-    return sheet_name
+    return ws.title, target_row, gap_note
+
+
+def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict):
+    """이미 저장된 칸(같은 시트/행)을 새 값으로 덮어씀 (중복 행 생성 안 함)."""
+    if not os.path.exists(HEAT_LOG_FILE):
+        raise ValueError("저장된 기록 파일이 없습니다.")
+    wb = openpyxl.load_workbook(HEAT_LOG_FILE)
+    if sheet_name not in wb.sheetnames:
+        raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
+    ws = wb[sheet_name]
+    ws.cell(row=target_row, column=3, value=fields["측정시간"])
+    ws.cell(row=target_row, column=4, value=_to_number(fields["기온"]))
+    ws.cell(row=target_row, column=5, value=_to_number(fields["습도"]))
+    ws.cell(row=target_row, column=6, value=_to_number(fields["체감온도"]))
+    ws.cell(row=target_row, column=7, value=fields["측정자"])
+    wb.save(HEAT_LOG_FILE)
 
 
 def render_heat_index_log():
@@ -2276,86 +2479,132 @@ def render_heat_index_log():
         st.error("openpyxl 패키지가 설치되어 있지 않습니다. requirements.txt에 openpyxl을 추가해주세요.")
         return
 
+    if not os.path.exists(HEAT_TEMPLATE_XLSX):
+        st.error(
+            "템플릿 파일이 없습니다. 저장소의 templates/heat_index_template.xlsx 위치에 "
+            "체감온도측정 대장 양식을 추가해주세요."
+        )
+        return
+
+    if "GPT_API_KEY" not in st.secrets:
+        st.error("Secrets에 GPT_API_KEY 설정이 필요합니다. (기존 번역 기능과 같은 키를 사용합니다)")
+        return
+
+    api_key = st.secrets["GPT_API_KEY"]
+
+    if "heat_saved" not in st.session_state:
+        st.session_state["heat_saved"] = {}
+
     heat_files = st.file_uploader(
-        "측정 사진 업로드",
+        "측정 사진 업로드 (카톡 캡쳐 등, 여러 건이 섞여 있어도 됩니다)",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif"],
         key="heat_index_uploader"
     )
 
     if heat_files:
-        for idx, f in enumerate(heat_files):
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+        for f in heat_files:
+            file_key = f"{f.name}_{f.size}"
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(f.getbuffer())
-                original_path = tmp.name
+            # 최초 처리: 즉시 OCR + 자동저장 (페이지를 나가도 유실되지 않도록 버튼 대기 없이 바로 저장)
+            if file_key not in st.session_state["heat_saved"]:
+                suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(f.getbuffer())
+                    original_path = tmp.name
 
-            with st.spinner(f"{f.name} 분석 중..."):
-                ocr_text = extract_ocr_text(original_path)
-            parsed = parse_heat_index_fields(ocr_text)
+                with st.spinner(f"{f.name} 분석 및 자동저장 중..."):
+                    try:
+                        records = extract_heat_records_with_gpt(api_key, original_path)
+                    except Exception as e:
+                        st.error(f"{f.name} 분석 실패: {e}")
+                        records = []
 
-            with st.expander(f"측정 사진 #{idx + 1} - {f.name}", expanded=True):
-                c1, c2 = st.columns([1, 2])
+                    saved_entries = []
+                    for rec in records:
+                        if rec["체감온도"] == "" and rec["기온"] and rec["습도"]:
+                            try:
+                                rec["체감온도"] = str(calc_heat_index(float(rec["기온"]), float(rec["습도"])))
+                            except (TypeError, ValueError):
+                                pass
 
-                with c1:
-                    st.image(original_path, width=200)
+                        if not rec["측정위치"]:
+                            rec["측정위치"] = "미지정"
+                        if not rec["측정일자"]:
+                            rec["측정일자"] = datetime.now().strftime("%Y-%m-%d")
+                        if not rec["측정시간"]:
+                            rec["측정시간"] = datetime.now().strftime("%H:%M")
 
-                with c2:
-                    date = st.text_input("측정일자", parsed["측정일자"], key=f"heat_date_{idx}")
-                    time_ = st.text_input("측정시간", parsed["측정시간"], key=f"heat_time_{idx}")
-                    temp = st.text_input("기온", parsed["기온"], key=f"heat_temp_{idx}")
-                    humidity = st.text_input("습도", parsed["습도"], key=f"heat_hum_{idx}")
-                    feels = st.text_input("체감온도", parsed["체감온도"], key=f"heat_feels_{idx}")
-                    measurer = st.text_input("측정자", parsed["측정자"], key=f"heat_person_{idx}")
-                    location = st.text_input("측정위치", parsed["측정위치"], key=f"heat_loc_{idx}")
+                        try:
+                            sheet_name, target_row, gap_note = save_heat_measurement(rec["측정위치"], rec)
+                            saved_entries.append({
+                                "sheet": sheet_name, "row": target_row,
+                                "gap_note": gap_note, "values": rec, "error": None
+                            })
+                        except Exception as e:
+                            saved_entries.append({
+                                "sheet": None, "row": None,
+                                "gap_note": "", "values": rec, "error": str(e)
+                            })
 
-                with st.expander("OCR 원문 보기"):
-                    st.text(ocr_text or "(인식된 텍스트 없음)")
+                    st.session_state["heat_saved"][file_key] = saved_entries
 
-                if st.button("이 기록 저장", key=f"heat_save_{idx}"):
-                    if not location.strip() or not date.strip() or not time_.strip():
-                        st.error("측정일자 / 측정시간 / 측정위치는 비워둘 수 없습니다. 확인 후 다시 저장해주세요.")
-                    else:
-                        row = {
-                            "측정일자": date.strip(), "측정시간": time_.strip(),
-                            "기온": temp.strip(), "습도": humidity.strip(),
-                            "체감온도": feels.strip(), "측정자": measurer.strip(),
-                            "측정위치": location.strip(),
+                if os.path.exists(original_path):
+                    try:
+                        os.remove(original_path)
+                    except Exception:
+                        pass
+
+            saved_entries = st.session_state["heat_saved"][file_key]
+
+            with st.expander(f"📷 {f.name} — {len(saved_entries)}건 인식", expanded=True):
+                if not saved_entries:
+                    st.warning("이 사진에서 측정 기록을 찾지 못했습니다.")
+
+                for i, entry in enumerate(saved_entries):
+                    if entry["error"]:
+                        st.error(f"저장 실패: {entry['error']}")
+                        continue
+
+                    st.success(f"✅ 자동저장됨 → '{entry['sheet']}' 시트 {entry['row']-5}번째 줄")
+                    if entry["gap_note"]:
+                        st.warning(entry["gap_note"])
+
+                    v = entry["values"]
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        st.caption(f"측정위치: {v['측정위치']}  |  측정일자: {v['측정일자']}")
+                        new_time = st.text_input("측정시간", v["측정시간"], key=f"heat_time_{file_key}_{i}")
+                        new_temp = st.text_input("기온", v["기온"], key=f"heat_temp_{file_key}_{i}")
+                    with ec2:
+                        new_hum = st.text_input("습도", v["습도"], key=f"heat_hum_{file_key}_{i}")
+                        new_feels = st.text_input("체감온도", v["체감온도"], key=f"heat_feels_{file_key}_{i}")
+                        new_person = st.text_input("측정자", v["측정자"], key=f"heat_person_{file_key}_{i}")
+
+                    if st.button("수정 반영", key=f"heat_fix_{file_key}_{i}"):
+                        fixed = {
+                            "측정시간": new_time.strip(), "기온": new_temp.strip(),
+                            "습도": new_hum.strip(), "체감온도": new_feels.strip(),
+                            "측정자": new_person.strip(),
                         }
                         try:
-                            saved_sheet = save_heat_log_row(location.strip(), row)
-                            st.success(f"'{saved_sheet}' 기록에 저장되었습니다.")
+                            overwrite_heat_row(entry["sheet"], entry["row"], fixed)
+                            entry["values"].update(fixed)
+                            st.success("수정 반영되었습니다.")
                         except Exception as e:
-                            st.error(f"저장 실패: {e}")
-
-            if os.path.exists(original_path):
-                try:
-                    os.remove(original_path)
-                except Exception:
-                    pass
+                            st.error(f"수정 실패: {e}")
 
     st.markdown("#### 누적 기록")
     if os.path.exists(HEAT_LOG_FILE):
-        wb = load_heat_log_workbook()
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            if ws.max_row < 2:
-                continue
-            rows = list(ws.iter_rows(values_only=True))
-            header, data_rows = rows[0], rows[1:]
-            st.caption(f"📍 {sheet_name} ({len(data_rows)}건)")
-            st.dataframe(
-                [dict(zip(header, r)) for r in data_rows],
-                use_container_width=True,
-                hide_index=True
-            )
+        wb = openpyxl.load_workbook(HEAT_LOG_FILE)
+        st.caption(f"저장된 일자별 기록 시트: {', '.join(wb.sheetnames)}")
 
+        today_str = datetime.now().strftime("%Y%m%d")
         with open(HEAT_LOG_FILE, "rb") as f:
             st.download_button(
-                "체감온도 기록 엑셀 다운로드",
+                "체감온도 측정 대장 엑셀 다운로드",
                 f,
-                file_name="heat_index_log.xlsx",
+                file_name=f"체감온도측정_대장_{today_str}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="heat_log_download_btn"
             )
