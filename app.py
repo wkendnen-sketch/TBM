@@ -2833,8 +2833,8 @@ def render_heat_index_log():
         st.session_state["heat_saved"] = {}
 
     st.caption(
-        "기온·습도·체감온도 판독값이 비면 같은 장소·같은 날짜의 정상 측정값 평균으로 자동 기입합니다. "
-        "같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용합니다."
+        "기온·습도·체감온도 판독값 측정. "
+        "장소 자료 파악."
     )
 
     heat_files = st.file_uploader(
