@@ -2163,7 +2163,9 @@ def render_shared_notice_board():
 #   - "2. 조치사항" 섹션은 템플릿 내용을 그대로 유지 (사진과 무관하므로 손대지 않음)
 #   - 사진에 체감온도가 안 보이면, 기온·습도로 기상청 공식 체감온도 산출식을 이용해 계산
 #     (표를 보고 어림잡지 않음 — 실측된 기온·습도로부터 결정적으로 계산되는 값이라 지어내는 것이 아님)
-#   - 측정이 2시간 넘게 비면 비고란에 "간격초과" 메모만 남기고, 값은 절대 지어내지 않음
+#   - 측정값 판독 공백은 같은 장소·날짜의 정상값 평균으로 자동 보완하고 비고란에 표시
+#     (같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용)
+#   - 측정이 2시간 넘게 비면 비고란에 "간격초과" 메모를 함께 남김
 #   - 사진을 올리면 즉시(버튼 클릭 없이) 자동 저장 → 페이지를 나가도 작업이 유실되지 않음
 #     이후 확인해서 값이 틀렸으면 "수정 반영"으로 같은 칸을 덮어씀 (중복 저장 안 됨)
 
@@ -2186,7 +2188,7 @@ def calc_heat_index(Ta: float, RH: float) -> float:
     return round(hi, 1)
 
 
-def image_to_data_url(image_path: str, max_dim: int = 1600, quality: int = 85) -> str:
+def image_to_data_url(image_path: str, max_dim: int = 2000, quality: int = 88) -> str:
     """GPT Vision 전송용으로 이미지를 적당히 축소 압축 후 base64 data URL로 변환."""
     img = Image.open(image_path)
     img = ImageOps.exif_transpose(img)
@@ -2209,13 +2211,19 @@ HEAT_EXTRACT_PROMPT = """이 이미지는 건설현장 체감온도 측정 기�
 JSON 객체로 만들어라.
 
 각 기록에서 다음을 추출하라:
-- 측정자: 말풍선 위에 표시된 카카오톡 발신자 이름 등 측정한 사람 이름
+- 측정자: 말풍선 위에 표시된 카카오톡 발신자 이름 등 측정한 사람의 실제 이름만 (직함/부서명 등은 제외)
 - 측정위치: 사진 캡션이나 근처 텍스트에 명시된 현장/구역/동 이름
 - 측정일자: 이미지에 날짜가 명시적으로 보이는 경우에만 YYYY-MM-DD 형식으로. 안 보이면 빈 문자열.
 - 측정시간: 말풍선 옆 시각(오전/오후 표기 가능)을 24시간제 HH:MM으로 변환. 안 보이면 빈 문자열.
-- 기온: 온습도계 화면에 표시된 숫자만 (단위 제외)
-- 습도: 온습도계 화면에 표시된 숫자만 (단위 제외)
+- 기온: 온습도계 LCD 화면에 표시된 숫자만 (단위 제외)
+- 습도: 온습도계 LCD 화면에 표시된 숫자만 (단위 제외)
 - 체감온도: 계산기 화면 등에 명확히 숫자로 표시된 경우에만. 안 보이면 빈 문자열 (직접 계산하거나 추측하지 마라).
+
+판독 정확도 관련 유의사항:
+- LCD 숫자 표시는 세그먼트 특성상 숫자가 헷갈리기 쉽다(예: 2↔7, 3↔8, 1↔7). 각 자릿수를 신중히 다시 확인하라.
+- 한국 건설현장의 여름철 기온은 대체로 15~40℃, 습도는 20~100% 범위다. 이 범위를 크게 벗어나는 값이 읽히면
+  오독 가능성이 높으니 이미지를 다시 확인하되, 그래도 화면에 그렇게 표시되어 있다면 읽은 그대로 적어라
+  (임의로 다른 값으로 바꾸지 마라 - 실제로 이례적인 수치일 수도 있다).
 
 중요: 불확실하거나 이미지에서 명확히 보이지 않는 값은 빈 문자열("")로 남겨라. 절대 추측해서 채우지 마라.
 
@@ -2382,21 +2390,102 @@ def get_or_create_heat_sheet(wb, template_ws, location: str, date_str: str):
     return ws
 
 
+def is_empty_heat_slot(ws, template_ws, row: int) -> bool:
+    """템플릿 원본과 C~H 값이 같거나 모두 비어 있으면 아직 사용하지 않은 행으로 판단."""
+    current_values = [ws.cell(row=row, column=col).value for col in range(3, 9)]
+    template_values = [template_ws.cell(row=row, column=col).value for col in range(3, 9)]
+
+    if all(v in (None, "") for v in current_values):
+        return True
+
+    return all(
+        current in (None, "") if template in (None, "") else current == template
+        for current, template in zip(current_values, template_values)
+    )
+
+
 def find_empty_heat_slot(ws, template_ws) -> Optional[int]:
-    """NO 1~9(6~14행) 중 아직 안 쓴 첫 번째 칸을 찾음. 다 찼으면 None."""
-    placeholder = template_ws["D6"].value
+    """NO 1~9(6~14행) 중 아직 안 쓴 첫 번째 칸을 찾음. 다 찼으면 None.
+
+    기존에는 기온(D열)이 비어 있으면 이미 기록된 행도 빈 행으로 오인할 수 있었다.
+    이제 시간·습도·체감온도·측정자·비고까지 포함한 C~H 전체를 확인한다.
+    """
     for row in range(6, 15):
-        val = ws.cell(row=row, column=4).value
-        if val == placeholder or val in (None, ""):
+        if is_empty_heat_slot(ws, template_ws, row):
             return row
     return None
 
 
 def heat_time_to_minutes(t) -> Optional[int]:
-    m = re.match(r"^(\d{1,2}):(\d{2})$", str(t or "").strip())
+    s = str(t or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+    if not m:
+        m = re.match(r"^(\d{1,2})\s*시\s*(\d{1,2})\s*분$", s)
     if not m:
         return None
     return int(m.group(1)) * 60 + int(m.group(2))
+
+
+def format_heat_time_display(t: str) -> str:
+    """'08:55' -> '08시 55분'. 이미 'OO시 OO분' 형식이면 그대로 둠. 파싱 안 되면 원문 유지."""
+    s = str(t or "").strip()
+    m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+    if m:
+        return f"{int(m.group(1)):02d}시 {int(m.group(2)):02d}분"
+    if re.match(r"^\d{1,2}\s*시\s*\d{1,2}\s*분$", s):
+        return s
+    return s
+
+
+HEAT_MEASURER_SUFFIXES = ["대원", "반장", "소장", "관리자", "주임", "팀장", "과장", "부장", "님"]
+
+
+def format_measurer(name: str) -> str:
+    """측정자 표기를 '이름 대원' 형식으로 정리. 예: '이용영대원' -> '이용영 대원'."""
+    s = str(name or "").strip()
+    if not s:
+        return s
+    for suf in HEAT_MEASURER_SUFFIXES:
+        if s.endswith(suf):
+            s = s[: -len(suf)].strip()
+            break
+    m = re.match(r"^[가-힣]{2,4}", s)
+    core = m.group(0) if m else s
+    return f"{core} 대원" if core else str(name or "").strip()
+
+
+def is_implausible_value(temp, humidity) -> bool:
+    """OCR/판독 오류일 가능성이 높은 비현실적 수치인지 확인 (자동 대체는 하지 않고 표시만 함)."""
+    try:
+        if temp not in (None, "") and not (10 <= float(temp) <= 40):
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if humidity not in (None, "") and not (0 <= float(humidity) <= 100):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+HEAT_EXPECTED_SLOTS = [("09시대", 8 * 60, 10 * 60), ("11시대", 10 * 60, 12 * 60),
+                        ("13시대", 12 * 60, 14 * 60), ("15시대", 14 * 60, 16 * 60)]
+
+
+def get_slot_coverage_text(ws) -> str:
+    """하루 기본 4회(9/11/13/15시 전후) 측정 슬롯 중 실제 기록이 있는 슬롯을 체크 표시로 보여줌."""
+    recorded_minutes = []
+    for r in range(6, 15):
+        mins = heat_time_to_minutes(ws.cell(row=r, column=3).value)
+        if mins is not None:
+            recorded_minutes.append(mins)
+
+    parts = []
+    for label, start, end in HEAT_EXPECTED_SLOTS:
+        covered = any(start <= m < end for m in recorded_minutes)
+        parts.append(f"{label} {'✅' if covered else '❌'}")
+    return "  ".join(parts)
 
 
 def _to_number(value):
@@ -2406,8 +2495,218 @@ def _to_number(value):
         return value
 
 
+HEAT_NUMERIC_FIELDS = {
+    "기온": 4,
+    "습도": 5,
+    "체감온도": 6,
+}
+
+HEAT_AUTO_NOTE_PREFIXES = (
+    "평균치 자동기입",
+    "체감온도 자동산출",
+    "평균 산출 불가",
+)
+
+
+def parse_heat_number(value, field_name: str = "") -> Optional[float]:
+    """'31.2℃', '65%' 같은 값도 숫자로 정리하고 평균 산출에 쓸 수 있는 범위인지 확인."""
+    if value in (None, ""):
+        return None
+
+    s = str(value).strip().replace(",", "")
+    m = re.search(r"-?\d+(?:\.\d+)?", s)
+    if not m:
+        return None
+
+    try:
+        number = float(m.group(0))
+    except (TypeError, ValueError):
+        return None
+
+    if field_name == "기온" and not (10 <= number <= 40):
+        return None
+    if field_name == "습도" and not (0 <= number <= 100):
+        return None
+    if field_name == "체감온도" and not (10 <= number <= 60):
+        return None
+    return number
+
+
+def round_heat_average(value: float) -> float:
+    return round(float(value), 1)
+
+
+def get_heat_field_averages_from_sheet(ws, exclude_row: Optional[int] = None) -> dict:
+    """같은 장소·날짜 시트의 정상 기록 평균을 구함. 유효한 측정시간이 있는 행만 사용."""
+    values = {field: [] for field in HEAT_NUMERIC_FIELDS}
+
+    for row_idx in range(6, 15):
+        if exclude_row is not None and row_idx == exclude_row:
+            continue
+        if heat_time_to_minutes(ws.cell(row=row_idx, column=3).value) is None:
+            continue
+
+        for field, col in HEAT_NUMERIC_FIELDS.items():
+            number = parse_heat_number(ws.cell(row=row_idx, column=col).value, field)
+            if number is not None:
+                values[field].append(number)
+
+    return {
+        field: round_heat_average(sum(nums) / len(nums))
+        for field, nums in values.items()
+        if nums
+    }
+
+
+def get_heat_field_averages_from_workbook_date(wb, date_str: str, exclude_sheet: str = "") -> dict:
+    """같은 장소 시트에 평균 자료가 없을 때, 같은 날짜의 다른 장소 기록 평균을 보조로 사용."""
+    mmdd = date_to_mmdd(date_str)
+    values = {field: [] for field in HEAT_NUMERIC_FIELDS}
+
+    for sheet_name in wb.sheetnames:
+        if sheet_name == exclude_sheet:
+            continue
+        if not re.search(rf"_{re.escape(mmdd)}(?:_\d+)?$", sheet_name):
+            continue
+
+        ws = wb[sheet_name]
+        for row_idx in range(6, 15):
+            if heat_time_to_minutes(ws.cell(row=row_idx, column=3).value) is None:
+                continue
+            for field, col in HEAT_NUMERIC_FIELDS.items():
+                number = parse_heat_number(ws.cell(row=row_idx, column=col).value, field)
+                if number is not None:
+                    values[field].append(number)
+
+    return {
+        field: round_heat_average(sum(nums) / len(nums))
+        for field, nums in values.items()
+        if nums
+    }
+
+
+def fill_missing_heat_values(
+    row: dict,
+    primary_averages: dict,
+    fallback_averages: Optional[dict] = None,
+) -> Tuple[List[str], bool, List[str]]:
+    """빈 기온·습도·체감온도를 평균으로 보완.
+
+    우선순위:
+    1) 같은 장소·같은 날짜 평균
+    2) 같은 날짜 다른 장소 평균
+    3) 기온·습도가 확보되면 체감온도 공식 계산
+    """
+    fallback_averages = fallback_averages or {}
+    averaged_fields = list(row.get("_average_filled", []))
+    unavailable_fields = []
+    auto_calculated = bool(row.get("_heat_index_calculated", False))
+
+    for field in ("기온", "습도"):
+        if parse_heat_number(row.get(field), field) is not None:
+            continue
+        average_value = primary_averages.get(field, fallback_averages.get(field))
+        if average_value is not None:
+            row[field] = str(round_heat_average(average_value))
+            if field not in averaged_fields:
+                averaged_fields.append(field)
+        else:
+            unavailable_fields.append(field)
+
+    if parse_heat_number(row.get("체감온도"), "체감온도") is None:
+        temp = parse_heat_number(row.get("기온"), "기온")
+        humidity = parse_heat_number(row.get("습도"), "습도")
+        if temp is not None and humidity is not None:
+            row["체감온도"] = str(calc_heat_index(temp, humidity))
+            auto_calculated = True
+        else:
+            average_value = primary_averages.get("체감온도", fallback_averages.get("체감온도"))
+            if average_value is not None:
+                row["체감온도"] = str(round_heat_average(average_value))
+                if "체감온도" not in averaged_fields:
+                    averaged_fields.append("체감온도")
+            else:
+                unavailable_fields.append("체감온도")
+
+    row["_average_filled"] = averaged_fields
+    row["_heat_index_calculated"] = auto_calculated
+    return averaged_fields, auto_calculated, unavailable_fields
+
+
+def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
+    """한 사진에서 추출된 기록끼리 먼저 평균 보완해, 첫 저장 건도 뒤쪽 정상값을 활용할 수 있게 함."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    now_time = datetime.now().strftime("%H:%M")
+
+    for rec in records:
+        if not rec.get("측정위치"):
+            rec["측정위치"] = "미지정"
+        if not rec.get("측정일자"):
+            rec["측정일자"] = today
+        if not rec.get("측정시간"):
+            rec["측정시간"] = now_time
+
+    grouped = {}
+    date_grouped = {}
+    for rec in records:
+        key = (normalize_for_match(rec.get("측정위치", "")), rec.get("측정일자", ""))
+        grouped.setdefault(key, []).append(rec)
+        date_grouped.setdefault(rec.get("측정일자", ""), []).append(rec)
+
+    def averages_from_records(group: List[dict]) -> dict:
+        result = {}
+        for field in HEAT_NUMERIC_FIELDS:
+            nums = [parse_heat_number(item.get(field), field) for item in group]
+            nums = [n for n in nums if n is not None]
+            if nums:
+                result[field] = round_heat_average(sum(nums) / len(nums))
+        return result
+
+    group_averages = {key: averages_from_records(group) for key, group in grouped.items()}
+    date_averages = {key: averages_from_records(group) for key, group in date_grouped.items()}
+
+    for rec in records:
+        key = (normalize_for_match(rec.get("측정위치", "")), rec.get("측정일자", ""))
+        fill_missing_heat_values(
+            rec,
+            group_averages.get(key, {}),
+            date_averages.get(rec.get("측정일자", ""), {}),
+        )
+
+    return records
+
+
+def clean_heat_auto_notes(existing_note: str) -> List[str]:
+    """수정 반영 시 이전 자동 평균/산출 메모만 제거하고 간격초과 등 다른 메모는 유지."""
+    parts = [part.strip() for part in str(existing_note or "").split(" / ") if part.strip()]
+    return [
+        part for part in parts
+        if not any(part.startswith(prefix) for prefix in HEAT_AUTO_NOTE_PREFIXES)
+    ]
+
+
+def build_heat_auto_notes(row: dict, unavailable_fields: Optional[List[str]] = None) -> List[str]:
+    notes = []
+    averaged_fields = list(dict.fromkeys(row.get("_average_filled", [])))
+    if averaged_fields:
+        details = []
+        for field in averaged_fields:
+            value = row.get(field, "")
+            unit = "%" if field == "습도" else "℃"
+            details.append(f"{field} {value}{unit}")
+        notes.append("평균치 자동기입(" + ", ".join(details) + ")")
+
+    if row.get("_heat_index_calculated"):
+        notes.append("체감온도 자동산출(기온·습도 기준)")
+
+    if unavailable_fields:
+        unique_fields = list(dict.fromkeys(unavailable_fields))
+        notes.append("평균 산출 불가(" + ", ".join(unique_fields) + ")")
+    return notes
+
+
 def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str]:
-    """측정 1건을 템플릿 기반 워크북에 저장. (시트명, 저장된 행번호, 간격초과 메모) 반환."""
+    """측정 1건을 템플릿 기반 워크북에 저장. (시트명, 저장된 행번호, 비고 메모) 반환."""
     template_ws = load_heat_template_sheet()
     if template_ws is None:
         raise ValueError(
@@ -2427,41 +2726,79 @@ def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str]:
     if target_row is None:
         raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
-    gap_note = ""
+    notes = []
+
+    # 판독 공백 자동 보완: 같은 장소·날짜 평균을 우선 사용하고,
+    # 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용한다.
+    same_sheet_averages = get_heat_field_averages_from_sheet(ws)
+    same_date_averages = get_heat_field_averages_from_workbook_date(
+        wb, row["측정일자"], exclude_sheet=ws.title
+    )
+    _, _, unavailable_fields = fill_missing_heat_values(
+        row, same_sheet_averages, same_date_averages
+    )
+    notes.extend(build_heat_auto_notes(row, unavailable_fields))
+
     new_min = heat_time_to_minutes(row["측정시간"])
     if target_row > 6 and new_min is not None:
         for prev_row in range(target_row - 1, 5, -1):
             prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
             if prev_min is not None:
                 if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
-                    gap_note = f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)"
+                    notes.append(f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)")
                 break
 
-    ws.cell(row=target_row, column=3, value=row["측정시간"])
+    if is_implausible_value(row["기온"], row["습도"]):
+        notes.append("⚠️확인필요(비현실적 수치, OCR 오독 가능성 - 직접 확인 후 수정 필요)")
+
+    gap_note = " / ".join(notes)
+
+    ws.cell(row=target_row, column=3, value=format_heat_time_display(row["측정시간"]))
     ws.cell(row=target_row, column=4, value=_to_number(row["기온"]))
     ws.cell(row=target_row, column=5, value=_to_number(row["습도"]))
     ws.cell(row=target_row, column=6, value=_to_number(row["체감온도"]))
-    ws.cell(row=target_row, column=7, value=row["측정자"])
+    ws.cell(row=target_row, column=7, value=format_measurer(row["측정자"]))
     ws.cell(row=target_row, column=8, value=gap_note)
 
     wb.save(HEAT_LOG_FILE)
     return ws.title, target_row, gap_note
 
 
-def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict):
-    """이미 저장된 칸(같은 시트/행)을 새 값으로 덮어씀 (중복 행 생성 안 함)."""
+def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict) -> Tuple[dict, str]:
+    """이미 저장된 칸을 덮어씀. 수정 화면에서 값을 비워도 주변 평균으로 다시 보완."""
     if not os.path.exists(HEAT_LOG_FILE):
         raise ValueError("저장된 기록 파일이 없습니다.")
     wb = openpyxl.load_workbook(HEAT_LOG_FILE)
     if sheet_name not in wb.sheetnames:
         raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
     ws = wb[sheet_name]
-    ws.cell(row=target_row, column=3, value=fields["측정시간"])
+
+    # 사용자가 수정 입력에서 빈 값을 남긴 경우에도 같은 장소·날짜 평균으로 보완한다.
+    fields.pop("_average_filled", None)
+    fields.pop("_heat_index_calculated", None)
+    same_sheet_averages = get_heat_field_averages_from_sheet(ws, exclude_row=target_row)
+
+    date_match = re.search(r"_(\d{4})(?:_\d+)?$", sheet_name)
+    date_str = date_match.group(1) if date_match else ""
+    same_date_averages = get_heat_field_averages_from_workbook_date(
+        wb, date_str, exclude_sheet=sheet_name
+    )
+    _, _, unavailable_fields = fill_missing_heat_values(
+        fields, same_sheet_averages, same_date_averages
+    )
+
+    existing_notes = clean_heat_auto_notes(ws.cell(row=target_row, column=8).value)
+    existing_notes.extend(build_heat_auto_notes(fields, unavailable_fields))
+    note_text = " / ".join(existing_notes)
+
+    ws.cell(row=target_row, column=3, value=format_heat_time_display(fields["측정시간"]))
     ws.cell(row=target_row, column=4, value=_to_number(fields["기온"]))
     ws.cell(row=target_row, column=5, value=_to_number(fields["습도"]))
     ws.cell(row=target_row, column=6, value=_to_number(fields["체감온도"]))
-    ws.cell(row=target_row, column=7, value=fields["측정자"])
+    ws.cell(row=target_row, column=7, value=format_measurer(fields["측정자"]))
+    ws.cell(row=target_row, column=8, value=note_text)
     wb.save(HEAT_LOG_FILE)
+    return fields, note_text
 
 
 def render_heat_index_log():
@@ -2495,6 +2832,11 @@ def render_heat_index_log():
     if "heat_saved" not in st.session_state:
         st.session_state["heat_saved"] = {}
 
+    st.caption(
+        "기온·습도·체감온도 판독값이 비면 같은 장소·같은 날짜의 정상 측정값 평균으로 자동 기입합니다. "
+        "같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용합니다."
+    )
+
     heat_files = st.file_uploader(
         "측정 사진 업로드 (카톡 캡쳐 등, 여러 건이 섞여 있어도 됩니다)",
         accept_multiple_files=True,
@@ -2520,23 +2862,15 @@ def render_heat_index_log():
                         st.error(f"{f.name} 분석 실패: {e}")
                         records = []
 
+                    # 한 사진 안의 정상 판독값도 먼저 평균에 활용한다.
+                    records = prepare_heat_records_for_average(records)
+
                     saved_entries = []
                     for rec in records:
-                        if rec["체감온도"] == "" and rec["기온"] and rec["습도"]:
-                            try:
-                                rec["체감온도"] = str(calc_heat_index(float(rec["기온"]), float(rec["습도"])))
-                            except (TypeError, ValueError):
-                                pass
-
-                        if not rec["측정위치"]:
-                            rec["측정위치"] = "미지정"
-                        if not rec["측정일자"]:
-                            rec["측정일자"] = datetime.now().strftime("%Y-%m-%d")
-                        if not rec["측정시간"]:
-                            rec["측정시간"] = datetime.now().strftime("%H:%M")
-
                         try:
                             sheet_name, target_row, gap_note = save_heat_measurement(rec["측정위치"], rec)
+                            rec["측정시간"] = format_heat_time_display(rec["측정시간"])
+                            rec["측정자"] = format_measurer(rec["측정자"])
                             saved_entries.append({
                                 "sheet": sheet_name, "row": target_row,
                                 "gap_note": gap_note, "values": rec, "error": None
@@ -2567,8 +2901,16 @@ def render_heat_index_log():
                         continue
 
                     st.success(f"✅ 자동저장됨 → '{entry['sheet']}' 시트 {entry['row']-5}번째 줄")
-                    if entry["gap_note"]:
+                    if "⚠️확인필요" in entry["gap_note"]:
+                        st.error(entry["gap_note"])
+                    elif "간격초과" in entry["gap_note"]:
                         st.warning(entry["gap_note"])
+                    elif entry["gap_note"]:
+                        st.info(entry["gap_note"])
+
+                    wb_preview = openpyxl.load_workbook(HEAT_LOG_FILE)
+                    if entry["sheet"] in wb_preview.sheetnames:
+                        st.caption(f"오늘 이 장소 측정현황(4회 기준): {get_slot_coverage_text(wb_preview[entry['sheet']])}")
 
                     v = entry["values"]
                     ec1, ec2 = st.columns(2)
@@ -2588,9 +2930,12 @@ def render_heat_index_log():
                             "측정자": new_person.strip(),
                         }
                         try:
-                            overwrite_heat_row(entry["sheet"], entry["row"], fixed)
+                            fixed, updated_note = overwrite_heat_row(entry["sheet"], entry["row"], fixed)
+                            fixed["측정시간"] = format_heat_time_display(fixed["측정시간"])
+                            fixed["측정자"] = format_measurer(fixed["측정자"])
                             entry["values"].update(fixed)
-                            st.success("수정 반영되었습니다.")
+                            entry["gap_note"] = updated_note
+                            st.success("수정 반영되었습니다. 빈 측정값은 평균치로 자동 보완됩니다.")
                         except Exception as e:
                             st.error(f"수정 실패: {e}")
 
