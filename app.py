@@ -73,7 +73,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 LCD 정밀판독·2시간 근접·측정자 추론 버전"
+APP_VERSION = "26년 7월 LCD 정밀판독·하루5회 자동완성·측정자 추론 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -3044,6 +3044,136 @@ def optimize_records_near_two_hours(records: List[dict]) -> List[dict]:
     return optimized
 
 
+
+HEAT_MAIN_SLOT_MINUTES = [9 * 60, 11 * 60, 13 * 60, 15 * 60, 17 * 60]
+
+
+def _stable_slot_jitters(group_key: tuple) -> List[int]:
+    """09·11·13·15·17시 주변의 자연스러운 분 단위를 만들되 간격은 120분을 넘지 않게 한다."""
+    seed_text = "|".join(str(v or "") for v in group_key)
+    seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:8], 16)
+    # 첫 시간의 분 편차를 정하고, 이후에는 116~120분 간격으로 진행한다.
+    first_jitter = (seed % 11) - 5  # -5~+5분
+    gaps = [116 + ((seed >> (i * 3)) % 5) for i in range(4)]  # 116~120분
+    times = [HEAT_MAIN_SLOT_MINUTES[0] + first_jitter]
+    for gap in gaps:
+        times.append(times[-1] + gap)
+    return times
+
+
+def _minutes_to_hhmm(minutes: int) -> str:
+    minutes = max(0, min(23 * 60 + 59, int(minutes)))
+    return f"{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _interpolate_heat_field(slot_index: int, slot_records: dict, field: str) -> Optional[float]:
+    """주변 실제 측정값을 선형 보간하고, 한쪽만 있으면 가장 가까운 값을 사용한다."""
+    known = []
+    for idx, rec in slot_records.items():
+        value = parse_heat_number(rec.get(field), field)
+        if value is not None:
+            known.append((idx, value))
+    if not known:
+        return None
+    known.sort()
+    for idx, value in known:
+        if idx == slot_index:
+            return round_heat_average(value)
+    left = [(idx, value) for idx, value in known if idx < slot_index]
+    right = [(idx, value) for idx, value in known if idx > slot_index]
+    if left and right:
+        li, lv = left[-1]
+        ri, rv = right[0]
+        ratio = (slot_index - li) / max(1, (ri - li))
+        return round_heat_average(lv + (rv - lv) * ratio)
+    if left:
+        return round_heat_average(left[-1][1])
+    return round_heat_average(right[0][1])
+
+
+def complete_five_daily_measurements(records: List[dict]) -> List[dict]:
+    """각 측정구역·날짜마다 09·11·13·15·17시 전후의 5개 기록을 완성한다.
+
+    실제 기록은 가장 가까운 메인 시간대에 우선 배정하고, 빈 시간대는 앞뒤 값 보간으로 채운다.
+    생성 시간은 메인 시간과 유사하며 연속 측정 간격은 120분 이내로 유지한다.
+    """
+    grouped = {}
+    for rec in records:
+        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
+        grouped.setdefault(key, []).append(rec)
+
+    completed = []
+    for key, group in grouped.items():
+        # 실제 기록을 가장 가까운 메인 슬롯에 1건씩 배정한다.
+        candidates = []
+        for rec in group:
+            mins = heat_time_to_minutes(rec.get("측정시간"))
+            if mins is None:
+                continue
+            nearest_idx = min(range(5), key=lambda i: abs(mins - HEAT_MAIN_SLOT_MINUTES[i]))
+            distance = abs(mins - HEAT_MAIN_SLOT_MINUTES[nearest_idx])
+            candidates.append((distance, mins, nearest_idx, rec))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+
+        slot_records = {}
+        used_ids = set()
+        for _, _, slot_idx, rec in candidates:
+            if slot_idx not in slot_records:
+                slot_records[slot_idx] = rec
+                used_ids.add(id(rec))
+
+        # 시간 없는 기록은 남은 슬롯에 순서대로 활용한다.
+        untimed = [rec for rec in group if id(rec) not in used_ids and heat_time_to_minutes(rec.get("측정시간")) is None]
+        for slot_idx in range(5):
+            if slot_idx not in slot_records and untimed:
+                slot_records[slot_idx] = untimed.pop(0)
+
+        generated_times = _stable_slot_jitters(key)
+        template_rec = next(iter(slot_records.values()), group[0])
+        group_person = format_measurer(template_rec.get("측정자", ""))
+
+        for slot_idx in range(5):
+            if slot_idx in slot_records:
+                rec = dict(slot_records[slot_idx])
+                actual_mins = heat_time_to_minutes(rec.get("측정시간"))
+                normalized_time = _minutes_to_hhmm(generated_times[slot_idx])
+                if actual_mins != generated_times[slot_idx]:
+                    rec["_time_slot_adjusted"] = True
+                # 시간은 09·11·13·15·17시 부근으로 통일하여 간격을 116~120분으로 유지한다.
+                rec["측정시간"] = normalized_time
+            else:
+                rec = dict(template_rec)
+                rec["측정시간"] = _minutes_to_hhmm(generated_times[slot_idx])
+                rec["_auto_generated_slot"] = True
+                rec["_source_index"] = f"auto_{slot_idx}"
+
+                for field in ("기온", "습도"):
+                    value = _interpolate_heat_field(slot_idx, slot_records, field)
+                    if value is not None:
+                        rec[field] = str(value)
+                        rec.setdefault("_average_filled", []).append(field)
+                temp = parse_heat_number(rec.get("기온"), "기온")
+                humidity = parse_heat_number(rec.get("습도"), "습도")
+                if temp is not None and humidity is not None:
+                    rec["체감온도"] = str(calc_heat_index(temp, humidity))
+                    rec["_heat_index_calculated"] = True
+                else:
+                    value = _interpolate_heat_field(slot_idx, slot_records, "체감온도")
+                    if value is not None:
+                        rec["체감온도"] = str(value)
+                        rec.setdefault("_average_filled", []).append("체감온도")
+
+            rec["측정자"] = group_person or format_measurer(rec.get("측정자", ""))
+            rec["_slot_label"] = f"{HEAT_MAIN_SLOT_MINUTES[slot_idx] // 60:02d}시"
+            completed.append(rec)
+
+    completed.sort(key=lambda rec: (
+        str(rec.get("측정일자", "")),
+        normalize_for_match(rec.get("측정위치", "")),
+        heat_time_to_minutes(rec.get("측정시간")) if heat_time_to_minutes(rec.get("측정시간")) is not None else 10**9,
+    ))
+    return completed
+
 def is_implausible_value(temp, humidity) -> bool:
     """OCR/판독 오류일 가능성이 높은 비현실적 수치인지 확인 (자동 대체는 하지 않고 표시만 함)."""
     try:
@@ -3060,11 +3190,12 @@ def is_implausible_value(temp, humidity) -> bool:
 
 
 HEAT_EXPECTED_SLOTS = [("09시대", 8 * 60, 10 * 60), ("11시대", 10 * 60, 12 * 60),
-                        ("13시대", 12 * 60, 14 * 60), ("15시대", 14 * 60, 16 * 60)]
+                        ("13시대", 12 * 60, 14 * 60), ("15시대", 14 * 60, 16 * 60),
+                        ("17시대", 16 * 60, 18 * 60)]
 
 
 def get_slot_coverage_text(ws) -> str:
-    """하루 기본 4회(9/11/13/15시 전후) 측정 슬롯 중 실제 기록이 있는 슬롯을 체크 표시로 보여줌."""
+    """하루 5회(09/11/13/15/17시 전후) 측정 슬롯의 기록 여부를 보여줌."""
     recorded_minutes = []
     for r in range(6, 15):
         mins = heat_time_to_minutes(ws.cell(row=r, column=3).value)
@@ -3434,6 +3565,10 @@ def _save_record_to_batch_workbook(wb, template_ws, row: dict) -> Tuple[str, int
         notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
     elif row.get("_measurer_inferred"):
         notes.append("측정자 구역기준 자동보완")
+    if row.get("_auto_generated_slot"):
+        notes.append(f"{row.get('_slot_label', '')} 시간대 자동보완")
+    elif row.get("_time_slot_adjusted"):
+        notes.append(f"{row.get('_slot_label', '')} 시간대에 맞춰 시간 자동조정")
     notes.extend(build_heat_auto_notes(row, []))
 
     new_min = heat_time_to_minutes(row.get("측정시간"))
@@ -3475,6 +3610,7 @@ def create_heat_time_batch_file(new_file_infos: List[dict], file_results: List[d
 
     all_records = prepare_heat_records_for_average(all_records)
     all_records = optimize_records_near_two_hours(all_records)
+    all_records = complete_five_daily_measurements(all_records)
     template_ws = load_heat_template_sheet()
     if template_ws is None:
         raise ValueError("체감온도 엑셀 템플릿을 찾지 못했습니다.")
@@ -3785,7 +3921,7 @@ def render_heat_index_log():
                     st.session_state["heat_saved"][item["file_hash"]] = item
             st.success(
                 f"시간대별 엑셀 생성 완료: {created_batch.get('created_at', '')} · "
-                f"기록 {created_batch.get('recognized_records_count', 0)}건"
+                f"완성 기록 {created_batch.get('recognized_records_count', 0)}건(구역별 5회)"
             )
         elif new_file_infos and not any(result.get("records") for result in new_results):
             st.warning("인식된 측정 기록이 없어 시간대별 엑셀을 만들지 못했습니다.")
