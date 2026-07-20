@@ -52,6 +52,13 @@ try:
 except Exception:
     openpyxl = None
 
+try:
+    import cv2
+    import numpy as np
+except Exception:
+    cv2 = None
+    np = None
+
 _PADDLE_OCR = None
 
 
@@ -66,7 +73,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 LCD 자동확대·완료파일 재생성 보정 버전"
+APP_VERSION = "26년 7월 LCD 정밀판독·2시간 근접·측정자 추론 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -2168,12 +2175,13 @@ def render_shared_notice_board():
 #     (표를 보고 어림잡지 않음 — 실측된 기온·습도로부터 결정적으로 계산되는 값이라 지어내는 것이 아님)
 #   - 측정값 판독 공백은 같은 장소·날짜의 정상값 평균으로 자동 보완하고 비고란에 표시
 #     (같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용)
-#   - 측정이 2시간 넘게 비면 비고란에 "간격초과" 메모를 함께 남김
+#   - 같은 장소 후보가 여러 건이면 2시간 이내에서 2시간에 가장 가까운 간격을 우선 선택
+#   - 같은 측정구역은 측정자 1명 원칙으로 정상 인식 이름을 나머지 기록에 자동 적용
 #   - 사진을 올리면 즉시(버튼 클릭 없이) 자동 저장 → 페이지를 나가도 작업이 유실되지 않음
 #     이후 확인해서 값이 틀렸으면 "수정 반영"으로 같은 칸을 덮어씀 (중복 저장 안 됨)
 
 HEAT_TEMPLATE_XLSX = os.path.join(BASE_DIR, "templates", "heat_index_template.xlsx")
-HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")
+HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")  # 호환용: 새 버전에서는 생성/사용하지 않음
 HEAT_UPLOAD_HISTORY_FILE = os.path.join(BASE_DIR, "heat_upload_history.json")
 HEAT_EXPORT_HISTORY_DIR = os.path.join(BASE_DIR, "heat_export_history")
 HEAT_LOG_GAP_MINUTES = 120
@@ -2263,145 +2271,205 @@ def _heat_rect_iou(a, b) -> float:
     return inter / max(1, area_a + area_b - inter)
 
 
-def detect_heat_lcd_candidate_crops(img: Image.Image, max_candidates: int = 3) -> List[Image.Image]:
-    """사진에서 LCD로 보이는 고대비 직사각형 영역을 자동 탐색해 확대용 크롭을 반환."""
-    if img.mode != "RGB":
-        img = img.convert("RGB")
+def _order_heat_quad_points(points):
+    """OpenCV 사각형 꼭짓점을 좌상·우상·우하·좌하 순서로 정렬."""
+    pts = np.asarray(points, dtype="float32").reshape(4, 2)
+    sums = pts.sum(axis=1)
+    diffs = np.diff(pts, axis=1).reshape(-1)
+    return np.array([
+        pts[np.argmin(sums)],
+        pts[np.argmin(diffs)],
+        pts[np.argmax(sums)],
+        pts[np.argmax(diffs)],
+    ], dtype="float32")
 
+
+def _perspective_heat_crop(image_bgr, points):
+    ordered = _order_heat_quad_points(points)
+    tl, tr, br, bl = ordered
+    width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
+    height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
+    if width < 50 or height < 35:
+        return None
+    destination = np.array(
+        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+        dtype="float32",
+    )
+    matrix = cv2.getPerspectiveTransform(ordered, destination)
+    return cv2.warpPerspective(image_bgr, matrix, (width, height))
+
+
+def _fallback_heat_lcd_crops(img: Image.Image, max_candidates: int = 2) -> List[Image.Image]:
+    """OpenCV를 사용할 수 없을 때 기존 방식으로 LCD 후보를 찾음."""
     original_w, original_h = img.size
-    if original_w < 80 or original_h < 80:
-        return []
-
     preview = img.copy()
     preview.thumbnail((720, 720), Image.LANCZOS)
     pw, ph = preview.size
-
     gray = ImageOps.autocontrast(preview.convert("L"), cutoff=1)
     edges = ImageOps.autocontrast(gray.filter(ImageFilter.FIND_EDGES), cutoff=1)
 
     candidates = []
-    for width_ratio in (0.14, 0.19, 0.25, 0.33, 0.43):
+    for width_ratio in (0.18, 0.24, 0.31, 0.40):
         win_w = max(70, int(pw * width_ratio))
-        for aspect in (0.9, 1.15, 1.45, 1.8):
-            win_h = max(55, int(win_w / aspect))
+        for aspect in (0.9, 1.2, 1.55, 1.9):
+            win_h = max(50, int(win_w / aspect))
             if win_w >= pw or win_h >= ph:
                 continue
-
-            step = max(26, int(min(win_w, win_h) * 0.42))
-            y_positions = list(range(0, max(1, ph - win_h + 1), step))
-            x_positions = list(range(0, max(1, pw - win_w + 1), step))
-            if not y_positions or y_positions[-1] != ph - win_h:
-                y_positions.append(ph - win_h)
-            if not x_positions or x_positions[-1] != pw - win_w:
-                x_positions.append(pw - win_w)
-
-            for y1 in y_positions:
-                for x1 in x_positions:
+            step = max(24, int(min(win_w, win_h) * 0.45))
+            for y1 in range(0, max(1, ph - win_h + 1), step):
+                for x1 in range(0, max(1, pw - win_w + 1), step):
                     box = (x1, y1, x1 + win_w, y1 + win_h)
-                    edge_stat = ImageStat.Stat(edges.crop(box))
-                    gray_stat = ImageStat.Stat(gray.crop(box))
-                    edge_mean = edge_stat.mean[0]
-                    contrast = gray_stat.stddev[0]
-                    brightness = gray_stat.mean[0]
-
+                    edge_mean = ImageStat.Stat(edges.crop(box)).mean[0]
+                    stat = ImageStat.Stat(gray.crop(box))
+                    contrast = stat.stddev[0]
                     cx = (x1 + win_w / 2) / max(1, pw)
                     cy = (y1 + win_h / 2) / max(1, ph)
-                    center_bonus = max(0.0, 1.0 - ((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5 * 1.4)
-                    brightness_penalty = 8.0 if brightness < 18 or brightness > 242 else 0.0
-                    score = edge_mean * 0.72 + contrast * 0.78 + center_bonus * 7.0 - brightness_penalty
-                    candidates.append((score, box))
+                    center_bonus = max(0.0, 1.0 - (((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5 * 1.5))
+                    candidates.append((edge_mean * 0.7 + contrast * 0.9 + center_bonus * 8.0, box))
 
     selected = []
-    for score, box in sorted(candidates, key=lambda x: x[0], reverse=True):
-        if any(_heat_rect_iou(box, prev_box) > 0.35 for _, prev_box in selected):
+    for score, box in sorted(candidates, reverse=True):
+        if any(_heat_rect_iou(box, prev) > 0.35 for _, prev in selected):
             continue
         selected.append((score, box))
         if len(selected) >= max_candidates:
             break
 
-    scale_x = original_w / max(1, pw)
-    scale_y = original_h / max(1, ph)
+    sx, sy = original_w / max(1, pw), original_h / max(1, ph)
     crops = []
     for _, (x1, y1, x2, y2) in selected:
-        ox1, oy1 = int(x1 * scale_x), int(y1 * scale_y)
-        ox2, oy2 = int(x2 * scale_x), int(y2 * scale_y)
-        pad_x = int((ox2 - ox1) * 0.18)
-        pad_y = int((oy2 - oy1) * 0.22)
-        ox1, oy1 = max(0, ox1 - pad_x), max(0, oy1 - pad_y)
-        ox2, oy2 = min(original_w, ox2 + pad_x), min(original_h, oy2 + pad_y)
-        if ox2 - ox1 >= 50 and oy2 - oy1 >= 40:
-            crops.append(img.crop((ox1, oy1, ox2, oy2)))
+        ox1, oy1, ox2, oy2 = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
+        px, py = int((ox2 - ox1) * 0.15), int((oy2 - oy1) * 0.18)
+        box = (max(0, ox1 - px), max(0, oy1 - py), min(original_w, ox2 + px), min(original_h, oy2 + py))
+        crops.append(img.crop(box))
     return crops
 
 
+def detect_heat_lcd_candidate_crops(img: Image.Image, max_candidates: int = 2) -> List[Image.Image]:
+    """OpenCV로 LCD 사각형을 탐색하고 기울기를 펴서 상위 후보만 반환.
+
+    opencv-python-headless가 없으면 PIL 기반 후보 탐색으로 자동 대체된다.
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    if cv2 is None or np is None:
+        return _fallback_heat_lcd_crops(img, max_candidates=max_candidates)
+
+    rgb = np.asarray(img)
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    original_h, original_w = bgr.shape[:2]
+    scale = min(1.0, 1200.0 / max(original_w, original_h))
+    work = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr.copy()
+
+    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
+    blurred = cv2.GaussianBlur(clahe, (5, 5), 0)
+    edges = cv2.Canny(blurred, 45, 145)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    image_area = work.shape[0] * work.shape[1]
+    candidates = []
+
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < image_area * 0.006 or area > image_area * 0.60:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.035 * perimeter, True)
+        rect = cv2.minAreaRect(contour)
+        rw, rh = rect[1]
+        if rw <= 0 or rh <= 0:
+            continue
+        aspect = max(rw, rh) / max(1.0, min(rw, rh))
+        if not (1.0 <= aspect <= 3.8):
+            continue
+        box_area = rw * rh
+        rectangularity = area / max(1.0, box_area)
+        if rectangularity < 0.42:
+            continue
+
+        if len(approx) == 4:
+            points = approx.reshape(4, 2).astype("float32")
+        else:
+            points = cv2.boxPoints(rect).astype("float32")
+
+        x, y, w, h = cv2.boundingRect(points.astype("int32"))
+        roi = clahe[max(0, y):min(clahe.shape[0], y + h), max(0, x):min(clahe.shape[1], x + w)]
+        if roi.size == 0:
+            continue
+        contrast = float(np.std(roi))
+        edge_density = float(np.mean(edges[max(0, y):min(edges.shape[0], y + h), max(0, x):min(edges.shape[1], x + w)] > 0))
+        cx = (x + w / 2) / max(1, work.shape[1])
+        cy = (y + h / 2) / max(1, work.shape[0])
+        center_bonus = max(0.0, 1.0 - (((cx - 0.5) ** 2 + (cy - 0.48) ** 2) ** 0.5 * 1.5))
+        score = contrast * 0.55 + edge_density * 100 * 0.35 + rectangularity * 18 + center_bonus * 8
+        candidates.append((score, points, (x, y, x + w, y + h)))
+
+    selected = []
+    for score, points, box in sorted(candidates, key=lambda item: item[0], reverse=True):
+        if any(_heat_rect_iou(box, prior_box) > 0.42 for _, _, prior_box in selected):
+            continue
+        selected.append((score, points, box))
+        if len(selected) >= max_candidates:
+            break
+
+    crops = []
+    inv_scale = 1.0 / scale
+    for _, points, _ in selected:
+        original_points = points * inv_scale
+        warped = _perspective_heat_crop(bgr, original_points)
+        if warped is None:
+            continue
+        # LCD 주변 프레임을 조금 남겨 ℃/% 위치까지 같이 판독한다.
+        h, w = warped.shape[:2]
+        pad_x, pad_y = max(4, int(w * 0.04)), max(4, int(h * 0.05))
+        warped = cv2.copyMakeBorder(warped, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE)
+        crop_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
+        crops.append(Image.fromarray(crop_rgb))
+
+    if not crops:
+        return _fallback_heat_lcd_crops(img, max_candidates=max_candidates)
+    return crops[:max_candidates]
+
+
 def make_heat_meter_vision_images(image_path: str) -> List[str]:
-    """LCD 자동 탐색 영역과 원본 보정본을 생성해 흐린 실측기 숫자를 재판독."""
+    """재판독용 이미지는 원본 문맥 1장과 가장 좋은 LCD 후보 최대 2장만 사용."""
     img = Image.open(image_path)
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    variants = [img.copy()]
+    original = ImageOps.autocontrast(img, cutoff=1)
+    original = ImageEnhance.Sharpness(original).enhance(2.0)
+    variants = [original]
 
-    # 전체 사진 강화본: 카카오톡 캡처의 이름·시간·위치 문맥도 유지한다.
-    full_enhanced = ImageOps.autocontrast(img, cutoff=1)
-    full_enhanced = ImageEnhance.Contrast(full_enhanced).enhance(1.40)
-    full_enhanced = ImageEnhance.Sharpness(full_enhanced).enhance(3.0)
-    full_enhanced = full_enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175, threshold=2))
-    variants.append(full_enhanced)
-
-    # 계기가 사진 중앙에 있는 일반적인 경우를 위한 넓은 문맥 확대본.
-    # 자동 후보가 숫자 일부만 잡아도 온도·습도 화면 전체를 함께 확인할 수 있다.
-    w, h = img.size
-    if w >= 100 and h >= 100:
-        context_crop = img.crop((int(w * 0.03), int(h * 0.02), int(w * 0.97), int(h * 0.86)))
-        context_crop = ImageOps.autocontrast(context_crop, cutoff=1)
-        context_crop = ImageEnhance.Contrast(context_crop).enhance(1.42)
-        context_crop = ImageEnhance.Sharpness(context_crop).enhance(3.2)
-        variants.append(context_crop)
-
-    # 사진에서 LCD 가능성이 높은 영역을 자동 탐색해 크게 확대한다.
-    lcd_crops = detect_heat_lcd_candidate_crops(img, max_candidates=2)
-    for crop_index, crop in enumerate(lcd_crops):
+    for crop in detect_heat_lcd_candidate_crops(img, max_candidates=2):
         crop = ImageOps.autocontrast(crop, cutoff=1)
         crop = ImageEnhance.Contrast(crop).enhance(1.55)
         crop = ImageEnhance.Sharpness(crop).enhance(3.8)
         crop = crop.filter(ImageFilter.UnsharpMask(radius=2, percent=210, threshold=1))
         variants.append(crop)
 
-        # 최우선 후보는 흑백 세그먼트 강화본도 추가한다.
-        if crop_index == 0:
-            gray = ImageOps.autocontrast(crop.convert("L"), cutoff=1)
-            gray = ImageEnhance.Contrast(gray).enhance(1.85)
-            gray = ImageEnhance.Sharpness(gray).enhance(3.4)
-            variants.append(gray.convert("RGB"))
-
     data_urls = []
     seen_hashes = set()
-    for variant in variants:
-        try:
-            thumb = variant.copy()
-            thumb.thumbnail((160, 160))
-            key_buf = io.BytesIO()
-            thumb.save(key_buf, format="PNG")
-            key = hashlib.sha256(key_buf.getvalue()).hexdigest()
-            if key in seen_hashes:
-                continue
-            seen_hashes.add(key)
-
-            data_urls.append(
-                pil_image_to_data_url(
-                    variant,
-                    max_dim=3000,
-                    min_dim=2200,
-                    quality=95,
-                )
-            )
-        except Exception:
+    for index, variant in enumerate(variants[:3]):
+        thumb = variant.copy()
+        thumb.thumbnail((160, 160))
+        key_buf = io.BytesIO()
+        thumb.save(key_buf, format="PNG")
+        key = hashlib.sha256(key_buf.getvalue()).hexdigest()
+        if key in seen_hashes:
             continue
-
-    return data_urls[:6]
-
+        seen_hashes.add(key)
+        data_urls.append(pil_image_to_data_url(
+            variant,
+            max_dim=2800 if index == 0 else 3200,
+            min_dim=1800 if index == 0 else 2400,
+            quality=94,
+        ))
+    return data_urls[:3]
 
 HEAT_EXTRACT_PROMPT = """이 이미지는 건설현장 체감온도 측정 기록 사진이다. 카카오톡 대화 캡쳐처럼
 서로 다른 위치/시각의 측정 기록이 한 장에 여러 건 섞여 있을 수 있다. 각 기록을 구분해서 각각 하나의
@@ -2463,6 +2531,14 @@ HEAT_METER_RETRY_PROMPT = """여러 입력 이미지는 모두 동일한 원본 
 측정기를 찾지 못하면 []만 출력하라."""
 
 
+HEAT_PRIMARY_MODEL = "gpt-4o-mini"
+HEAT_FALLBACK_MODEL = "gpt-5-mini"
+HEAT_MODEL_PRICING_USD_PER_MILLION = {
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "gpt-5-mini": {"input": 0.25, "output": 2.00},
+}
+
+
 def _extract_openai_output_text(data: dict) -> str:
     text = ""
     if data.get("output_text"):
@@ -2482,6 +2558,52 @@ def _safe_confidence(value, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
+def _heat_usage_from_response(data: dict, model: str) -> dict:
+    usage = data.get("usage") or {}
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    price = HEAT_MODEL_PRICING_USD_PER_MILLION.get(model, {"input": 0.0, "output": 0.0})
+    cost = (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000
+    return {
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": int(usage.get("total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens)),
+        "cost_usd": round(cost, 8),
+    }
+
+
+def _empty_heat_usage_summary() -> dict:
+    return {"calls": [], "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
+
+
+def merge_heat_usage(summary: dict, call_usage: Optional[dict]) -> dict:
+    if summary is None:
+        summary = _empty_heat_usage_summary()
+    if not call_usage:
+        return summary
+    summary.setdefault("calls", []).append(call_usage)
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        summary[key] = int(summary.get(key, 0) or 0) + int(call_usage.get(key, 0) or 0)
+    summary["cost_usd"] = round(float(summary.get("cost_usd", 0.0) or 0.0) + float(call_usage.get("cost_usd", 0.0) or 0.0), 8)
+    return summary
+
+
+def call_heat_vision_api(api_key: str, model: str, prompt: str, image_urls: List[str], timeout: int = 80) -> Tuple[str, dict]:
+    content = [{"type": "input_text", "text": prompt}]
+    content.extend({"type": "input_image", "image_url": url} for url in image_urls)
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
+        json={"model": model, "input": [{"role": "user", "content": content}]},
+        timeout=timeout,
+    )
+    if response.status_code != 200:
+        raise Exception(f"{model} API Error: {response.text}")
+    data = response.json()
+    return _extract_openai_output_text(data), _heat_usage_from_response(data, model)
+
+
 def parse_heat_meter_retry_response(text: str) -> List[dict]:
     cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
     try:
@@ -2490,51 +2612,39 @@ def parse_heat_meter_retry_response(text: str) -> List[dict]:
         cleaned = re.sub(r"[\x00-\x1F]+", " ", cleaned)
         match = re.search(r"\[.*\]", cleaned, re.S)
         parsed = json.loads(match.group(0)) if match else []
-
     if not isinstance(parsed, list):
         parsed = [parsed]
-
-    results = []
-    for item in parsed:
-        if not isinstance(item, dict):
-            continue
-        results.append({
-            "기온": str(item.get("기온", "") or "").strip(),
-            "습도": str(item.get("습도", "") or "").strip(),
-            "기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
-            "습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
-        })
-    return results
+    return [{
+        "기온": str(item.get("기온", "") or "").strip(),
+        "습도": str(item.get("습도", "") or "").strip(),
+        "기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
+        "습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
+    } for item in parsed if isinstance(item, dict)]
 
 
-def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> List[dict]:
-    """흐리거나 작은 실제 측정기 LCD를 확대·보정 이미지로 한 번 더 판독."""
+def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> Tuple[List[dict], dict]:
+    """불확실한 사진만 GPT-5 mini와 상위 LCD 후보로 재판독."""
     image_urls = make_heat_meter_vision_images(image_path)
     if not image_urls:
-        return []
+        return [], _empty_heat_usage_summary()
 
-    content = [{"type": "input_text", "text": HEAT_METER_RETRY_PROMPT}]
-    content.extend({"type": "input_image", "image_url": url} for url in image_urls)
-
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o-mini",
-        "input": [{"role": "user", "content": content}],
-    }
-
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers=headers,
-        json=payload,
-        timeout=75,
-    )
-    if response.status_code != 200:
-        return []
-
-    return parse_heat_meter_retry_response(_extract_openai_output_text(response.json()))
+    usage = _empty_heat_usage_summary()
+    try:
+        text, call_usage = call_heat_vision_api(
+            api_key, HEAT_FALLBACK_MODEL, HEAT_METER_RETRY_PROMPT, image_urls, timeout=90
+        )
+        merge_heat_usage(usage, call_usage)
+        return parse_heat_meter_retry_response(text), usage
+    except Exception:
+        # 계정/지역에서 GPT-5 mini 사용이 막힌 경우 기능 중단 대신 기존 모델로 1회 대체.
+        try:
+            text, call_usage = call_heat_vision_api(
+                api_key, HEAT_PRIMARY_MODEL, HEAT_METER_RETRY_PROMPT, image_urls, timeout=80
+            )
+            merge_heat_usage(usage, call_usage)
+            return parse_heat_meter_retry_response(text), usage
+        except Exception:
+            return [], usage
 
 
 def heat_record_needs_meter_retry(record: dict) -> bool:
@@ -2542,135 +2652,73 @@ def heat_record_needs_meter_retry(record: dict) -> bool:
     humidity = parse_heat_number(record.get("습도"), "습도")
     temp_conf = _safe_confidence(record.get("_기온확신도"), 0.0)
     hum_conf = _safe_confidence(record.get("_습도확신도"), 0.0)
-
-    if temp is None or humidity is None:
-        return True
-    if temp_conf < 0.82 or hum_conf < 0.82:
-        return True
-    return False
+    return temp is None or humidity is None or temp_conf < 0.82 or hum_conf < 0.82
 
 
 def _replace_meter_field(record: dict, retry: dict, field: str, direct_photo: bool = False):
     confidence_key = f"_{field}확신도"
     retry_confidence_key = f"{field}확신도"
-
     old_value = parse_heat_number(record.get(field), field)
     new_value = parse_heat_number(retry.get(field), field)
     if new_value is None:
         return
-
     old_conf = _safe_confidence(record.get(confidence_key), 0.0)
     new_conf = _safe_confidence(retry.get(retry_confidence_key), 0.0)
-
-    should_replace = False
-    if old_value is None:
-        should_replace = True
-    elif old_conf < 0.82 and new_conf >= old_conf:
-        should_replace = True
-    elif direct_photo and new_conf >= 0.90 and new_conf > old_conf:
-        # 측정기 단독 사진은 재판독 결과가 더 확실하면 기존 값도 교정한다.
-        should_replace = True
-
-    if should_replace:
+    if old_value is None or (old_conf < 0.82 and new_conf >= old_conf) or (direct_photo and new_conf >= 0.90 and new_conf > old_conf):
         record[field] = str(int(new_value)) if field == "습도" and new_value.is_integer() else str(new_value)
         record[confidence_key] = new_conf
         record["_meter_retry_used"] = True
 
 
 def merge_heat_meter_retry(records: List[dict], retry_values: List[dict]) -> List[dict]:
-    """1차 구조화 결과에 LCD 전용 재판독값을 안전하게 합침."""
     if not retry_values:
         return records
-
-    # 온습도계 사진만 단독으로 올린 경우에도 기록 1건을 생성한다.
     if not records:
         return [{
-            "측정자": "",
-            "측정위치": "",
-            "측정일자": "",
-            "측정시간": "",
-            "기온": item.get("기온", ""),
-            "습도": item.get("습도", ""),
-            "체감온도": "",
+            "측정자": "", "측정위치": "", "측정일자": "", "측정시간": "",
+            "기온": item.get("기온", ""), "습도": item.get("습도", ""), "체감온도": "",
             "_기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
             "_습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
             "_meter_retry_used": True,
         } for item in retry_values]
 
-    direct_photo = (
-        len(records) == 1
-        and not records[0].get("측정자")
-        and not records[0].get("측정위치")
-        and not records[0].get("측정일자")
-        and not records[0].get("측정시간")
-    )
-
+    direct_photo = len(records) == 1 and not any(records[0].get(k) for k in ("측정자", "측정위치", "측정일자", "측정시간"))
     if len(records) == len(retry_values):
-        pairs = list(zip(range(len(records)), retry_values))
+        pairs = zip(range(len(records)), retry_values)
     else:
-        retry_indexes = [
-            idx for idx, record in enumerate(records)
-            if heat_record_needs_meter_retry(record)
-        ]
-        pairs = list(zip(retry_indexes, retry_values))
+        retry_indexes = [idx for idx, record in enumerate(records) if heat_record_needs_meter_retry(record)]
+        pairs = zip(retry_indexes, retry_values)
 
     for record_index, retry in pairs:
         record = records[record_index]
         _replace_meter_field(record, retry, "기온", direct_photo=direct_photo)
         _replace_meter_field(record, retry, "습도", direct_photo=direct_photo)
-
-        # 기온 또는 습도가 재판독으로 바뀌었다면 기존 체감온도는 공식으로 다시 산출하도록 비운다.
         if record.get("_meter_retry_used"):
             record["체감온도"] = ""
-
     return records
 
 
-def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
-    """사진 1장에서 기록을 추출하고, 흐린 LCD는 확대·보정 후 자동 재판독."""
-    url = "https://api.openai.com/v1/responses"
-    data_url = image_to_data_url(image_path)
-
-    headers = {
-        "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4o-mini",
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": HEAT_EXTRACT_PROMPT},
-                    {"type": "input_image", "image_url": data_url},
-                ],
-            }
-        ],
-    }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=60)
-    if response.status_code != 200:
-        raise Exception(f"API Error: {response.text}")
-
-    records = parse_heat_gpt_response(_extract_openai_output_text(response.json()))
-
-    # 값이 비거나 확신도가 낮은 경우에만 LCD 전용 2차 판독을 실행한다.
-    # 온습도계 단독 사진도 실제 LCD 값을 재확인한다.
-    direct_photo = (
-        len(records) == 1
-        and not records[0].get("측정자")
-        and not records[0].get("측정위치")
-        and not records[0].get("측정일자")
-        and not records[0].get("측정시간")
+def extract_heat_records_with_gpt(api_key: str, image_path: str) -> Tuple[List[dict], dict]:
+    """1차는 저비용 모델 1회, 불확실한 사진만 상위 모델 1회 재판독."""
+    usage = _empty_heat_usage_summary()
+    text, call_usage = call_heat_vision_api(
+        api_key,
+        HEAT_PRIMARY_MODEL,
+        HEAT_EXTRACT_PROMPT,
+        [image_to_data_url(image_path)],
+        timeout=70,
     )
-    needs_retry = not records or any(heat_record_needs_meter_retry(r) for r in records) or direct_photo
+    merge_heat_usage(usage, call_usage)
+    records = parse_heat_gpt_response(text)
 
+    direct_photo = len(records) == 1 and not any(records[0].get(k) for k in ("측정자", "측정위치", "측정일자", "측정시간"))
+    needs_retry = not records or any(heat_record_needs_meter_retry(record) for record in records) or direct_photo
     if needs_retry:
-        retry_values = extract_heat_meter_values_with_gpt(api_key, image_path)
+        retry_values, retry_usage = extract_heat_meter_values_with_gpt(api_key, image_path)
+        for call in retry_usage.get("calls", []):
+            merge_heat_usage(usage, call)
         records = merge_heat_meter_retry(records, retry_values)
-
-    return records
-
+    return records, usage
 
 def parse_heat_gpt_response(text: str) -> List[dict]:
     """GPT 응답 텍스트를 JSON 배열로 파싱 (코드블록/잡텍스트 방어)."""
@@ -2763,13 +2811,19 @@ def get_or_create_heat_sheet(wb, template_ws, location: str, date_str: str):
 
     loc_norm = normalize_for_match(location)
     best_name, best_score = None, 0.0
+    target_numbers = re.findall(r"\d+", loc_norm)
     for name, prefix in candidates:
-        score = SequenceMatcher(None, normalize_for_match(prefix), loc_norm).ratio()
+        prefix_norm = normalize_for_match(prefix)
+        prefix_numbers = re.findall(r"\d+", prefix_norm)
+        # 101동과 102동처럼 숫자가 다른 장소는 문자열이 비슷해도 절대 병합하지 않는다.
+        if target_numbers and prefix_numbers and target_numbers != prefix_numbers:
+            continue
+        score = SequenceMatcher(None, prefix_norm, loc_norm).ratio()
         if score > best_score:
             best_score = score
             best_name = name
 
-    if best_score >= 0.75:
+    if best_name and best_score >= 0.86:
         return wb[best_name]
 
     safe_loc = re.sub(r'[\\/*?:\[\]]', "_", location).strip()[:20] or "미지정"
@@ -2881,6 +2935,113 @@ def format_measurer(name: str) -> str:
     """측정자 표기는 지정된 11명만 허용하며 항상 '이름 대원'으로 통일."""
     matched = match_allowed_measurer(name)
     return f"{matched} 대원" if matched else ""
+
+
+def _measurer_similarity_scores(raw_name: str) -> list:
+    """불완전한 OCR 이름을 지정된 11명과 비교한 점수 목록."""
+    compact = re.sub(r"[^가-힣]", "", str(raw_name or ""))
+    for suffix in HEAT_MEASURER_SUFFIXES:
+        suffix_compact = re.sub(r"[^가-힣]", "", suffix)
+        if compact.endswith(suffix_compact):
+            compact = compact[:-len(suffix_compact)]
+            break
+    if not compact:
+        return []
+    return sorted(((SequenceMatcher(None, compact, allowed).ratio(), allowed)
+                   for allowed in HEAT_ALLOWED_MEASURERS), reverse=True)
+
+
+def infer_measurer_per_location(records: List[dict]) -> List[dict]:
+    """같은 측정구역·날짜는 측정자 1명이라는 원칙으로 이름을 보완."""
+    grouped = {}
+    for rec in records:
+        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
+        grouped.setdefault(key, []).append(rec)
+
+    for group in grouped.values():
+        confident = []
+        for rec in group:
+            matched = match_allowed_measurer(rec.get("_raw_measurer", rec.get("측정자", "")))
+            if matched:
+                confident.append(matched)
+
+        selected = ""
+        if confident:
+            counts = {name: confident.count(name) for name in set(confident)}
+            selected = max(counts, key=lambda name: (counts[name], -HEAT_ALLOWED_MEASURERS.index(name)))
+        else:
+            aggregate = {name: 0.0 for name in HEAT_ALLOWED_MEASURERS}
+            evidence = 0
+            for rec in group:
+                scores = _measurer_similarity_scores(rec.get("_raw_measurer", ""))
+                if not scores:
+                    continue
+                evidence += 1
+                for score, name in scores:
+                    aggregate[name] += score
+            if evidence:
+                ranked = sorted(((score / evidence, name) for name, score in aggregate.items()), reverse=True)
+                best_score, best_name = ranked[0]
+                second_score = ranked[1][0] if len(ranked) > 1 else 0.0
+                if best_score >= 0.55 and best_score - second_score >= 0.04:
+                    selected = best_name
+
+        if selected:
+            formatted = f"{selected} 대원"
+            for rec in group:
+                was_recognized = bool(match_allowed_measurer(rec.get("_raw_measurer", "")))
+                rec["측정자"] = formatted
+                rec["_measurer_unrecognized"] = False
+                rec["_measurer_inferred"] = not was_recognized
+    return records
+
+
+def optimize_records_near_two_hours(records: List[dict]) -> List[dict]:
+    """같은 장소·날짜 후보 중 120분 이내에서 가장 120분에 가까운 기록을 선택."""
+    grouped = {}
+    for rec in records:
+        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
+        grouped.setdefault(key, []).append(rec)
+
+    optimized = []
+    for group in grouped.values():
+        timed, untimed = [], []
+        for rec in group:
+            mins = heat_time_to_minutes(rec.get("측정시간"))
+            if mins is None:
+                untimed.append(rec)
+            else:
+                timed.append((mins, rec))
+        timed.sort(key=lambda item: item[0])
+        if not timed:
+            optimized.extend(untimed)
+            continue
+
+        selected = [timed[0]]
+        cursor = 1
+        while cursor < len(timed):
+            last_min = selected[-1][0]
+            candidates = []
+            j = cursor
+            while j < len(timed) and timed[j][0] - last_min <= HEAT_LOG_GAP_MINUTES:
+                if timed[j][0] > last_min:
+                    candidates.append((j, timed[j]))
+                j += 1
+            if candidates:
+                chosen_index, chosen = candidates[-1]
+                selected.append(chosen)
+                cursor = chosen_index + 1
+            else:
+                selected.append(timed[cursor])
+                cursor += 1
+
+        optimized.extend(rec for _, rec in selected)
+        optimized.extend(untimed)
+
+    optimized.sort(key=lambda rec: (str(rec.get("측정일자", "")),
+                                    normalize_for_match(rec.get("측정위치", "")),
+                                    heat_time_to_minutes(rec.get("측정시간")) if heat_time_to_minutes(rec.get("측정시간")) is not None else 10**9))
+    return optimized
 
 
 def is_implausible_value(temp, humidity) -> bool:
@@ -3069,6 +3230,7 @@ def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
 
     for rec in records:
         raw_person = str(rec.get("측정자", "") or "").strip()
+        rec["_raw_measurer"] = raw_person
         formatted_person = format_measurer(raw_person)
         rec["측정자"] = formatted_person
         rec["_measurer_unrecognized"] = bool(raw_person and not formatted_person)
@@ -3106,7 +3268,7 @@ def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
             date_averages.get(rec.get("측정일자", ""), {}),
         )
 
-    return records
+    return infer_measurer_per_location(records)
 
 
 def clean_heat_auto_notes(existing_note: str) -> List[str]:
@@ -3144,21 +3306,16 @@ def ensure_heat_history_storage():
 
 
 def _empty_heat_upload_history() -> dict:
-    return {
-        "processed_files": {},
-        "batches": [],
-    }
+    return {"processed_files": {}, "batches": []}
 
 
 def load_heat_upload_history() -> dict:
-    """파일 해시와 시간대별 완료본 목록을 영구 저장한 JSON을 읽음."""
     ensure_heat_history_storage()
     if not os.path.exists(HEAT_UPLOAD_HISTORY_FILE):
         return _empty_heat_upload_history()
-
     try:
-        with open(HEAT_UPLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        with open(HEAT_UPLOAD_HISTORY_FILE, "r", encoding="utf-8") as file:
+            data = json.load(file)
         if not isinstance(data, dict):
             return _empty_heat_upload_history()
         data.setdefault("processed_files", {})
@@ -3169,16 +3326,14 @@ def load_heat_upload_history() -> dict:
 
 
 def save_heat_upload_history(history: dict):
-    """기록 손상을 줄이기 위해 임시 파일에 쓴 뒤 원자적으로 교체."""
     ensure_heat_history_storage()
     temp_path = HEAT_UPLOAD_HISTORY_FILE + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
+    with open(temp_path, "w", encoding="utf-8") as file:
+        json.dump(history, file, ensure_ascii=False, indent=2)
     os.replace(temp_path, HEAT_UPLOAD_HISTORY_FILE)
 
 
 def uploaded_file_hash(uploaded_file) -> Tuple[str, bytes]:
-    """파일명과 무관하게 실제 바이트 기준 SHA-256 해시를 계산."""
     file_bytes = uploaded_file.getvalue()
     return hashlib.sha256(file_bytes).hexdigest(), file_bytes
 
@@ -3191,23 +3346,16 @@ def _parse_history_datetime(value: str) -> Optional[datetime]:
 
 
 def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> Tuple[bool, dict]:
-    """새 파일이면 처리 예약. 이미 처리된 파일이면 False와 기존 메타데이터 반환."""
     now = datetime.now()
     with _HEAT_HISTORY_LOCK:
         history = load_heat_upload_history()
         existing = history["processed_files"].get(file_hash)
-
         if existing:
-            status = str(existing.get("status", "completed"))
+            batch_id = str(existing.get("batch_id", "") or "")
+            batch_exists = any(str(batch.get("batch_id", "")) == batch_id for batch in history.get("batches", []))
             started_at = _parse_history_datetime(existing.get("started_at", ""))
-            stale_processing = (
-                status == "processing"
-                and started_at is not None
-                and (now - started_at).total_seconds() > HEAT_PROCESSING_STALE_SECONDS
-            )
-
-            # 오류 건은 다음 세션에서 재시도 가능, 오래 멈춘 processing도 다시 처리.
-            if status != "error" and not stale_processing:
+            stale = existing.get("status") == "processing" and started_at and (now - started_at).total_seconds() > HEAT_PROCESSING_STALE_SECONDS
+            if existing.get("status") != "error" and not stale and batch_exists:
                 return False, existing
 
         reserved = {
@@ -3218,10 +3366,8 @@ def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> T
             "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "processed_at": "",
             "records_count": 0,
-            "new_records_count": 0,
-            "duplicate_records_count": 0,
-            "sheet_names": [],
             "batch_id": "",
+            "usage": {},
             "error": "",
         }
         history["processed_files"][file_hash] = reserved
@@ -3229,148 +3375,13 @@ def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> T
         return True, reserved
 
 
-def finalize_heat_upload(
-    file_hash: str,
-    status: str,
-    entries: List[dict],
-    error: str = "",
-):
-    successful_entries = [e for e in entries if not e.get("error")]
-    new_entries = [e for e in successful_entries if not e.get("duplicate")]
-    duplicate_entries = [e for e in successful_entries if e.get("duplicate")]
-    sheet_names = sorted({e.get("sheet", "") for e in successful_entries if e.get("sheet")})
-
-    with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        meta = history["processed_files"].setdefault(file_hash, {"file_hash": file_hash})
-        meta.update({
-            "status": status,
-            "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "records_count": len(successful_entries),
-            "new_records_count": len(new_entries),
-            "duplicate_records_count": len(duplicate_entries),
-            "sheet_names": sheet_names,
-            "error": str(error or ""),
-        })
-        save_heat_upload_history(history)
+def _find_batch_by_id(history: dict, batch_id: str) -> Optional[dict]:
+    return next((batch for batch in history.get("batches", []) if str(batch.get("batch_id", "")) == str(batch_id or "")), None)
 
 
-def create_heat_batch_snapshot(new_file_infos: List[dict], new_entries: List[dict]) -> Optional[dict]:
-    """이번 업로드에서 정상 인식된 기록이 있으면 누적 엑셀 스냅샷 1개 생성.
-
-    완료 파일을 삭제한 뒤 같은 사진을 다시 올린 경우에는 기존 행과 중복이더라도
-    전체 누적 대장을 다시 내려받을 수 있도록 완료 파일을 재생성한다.
-    """
-    successful_entries = [e for e in new_entries if not e.get("error")]
-    actual_new_entries = [e for e in successful_entries if not e.get("duplicate")]
-    reused_entries = [e for e in successful_entries if e.get("duplicate")]
-    if not new_file_infos or not successful_entries or not os.path.exists(HEAT_LOG_FILE):
-        return None
-
-    file_hashes = sorted({info["file_hash"] for info in new_file_infos})
-    batch_signature = hashlib.sha256("|".join(file_hashes).encode("utf-8")).hexdigest()
-
-    with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        for batch in history.get("batches", []):
-            if batch.get("batch_signature") == batch_signature:
-                return batch
-
-        now = datetime.now()
-        stamp = now.strftime("%Y%m%d_%H%M%S")
-        batch_id = f"{stamp}_{batch_signature[:8]}"
-        filename = f"체감온도측정_누적대장_{stamp}.xlsx"
-        snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
-
-        suffix = 2
-        while os.path.exists(snapshot_path):
-            filename = f"체감온도측정_누적대장_{stamp}_{suffix}.xlsx"
-            snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
-            suffix += 1
-
-        shutil.copy2(HEAT_LOG_FILE, snapshot_path)
-
-        batch = {
-            "batch_id": batch_id,
-            "batch_signature": batch_signature,
-            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-            "snapshot_filename": filename,
-            "source_files": [info.get("original_name", "") for info in new_file_infos],
-            "source_file_count": len(new_file_infos),
-            "new_records_count": len(actual_new_entries),
-            "reused_records_count": len(reused_entries),
-            "recognized_records_count": len(successful_entries),
-            "sheet_names": sorted({e.get("sheet", "") for e in successful_entries if e.get("sheet")}),
-        }
-        history.setdefault("batches", []).append(batch)
-
-        for info in new_file_infos:
-            meta = history["processed_files"].get(info["file_hash"])
-            if meta is not None:
-                meta["batch_id"] = batch_id
-
-        save_heat_upload_history(history)
-        return batch
-
-
-def get_heat_completed_batches() -> List[dict]:
-    history = load_heat_upload_history()
-    batches = []
-    for batch in history.get("batches", []):
-        filename = batch.get("snapshot_filename", "")
-        path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename) if filename else ""
-        if path and os.path.exists(path):
-            item = dict(batch)
-            item["snapshot_path"] = path
-            batches.append(item)
-    return sorted(batches, key=lambda x: x.get("created_at", ""), reverse=True)
-
-
-def delete_heat_completed_batch(batch_id: str) -> Tuple[bool, str]:
-    """시간대별 완료 파일과 목록을 삭제하고 해당 원본 사진의 재생성을 허용.
-
-    전체 누적 대장 행은 유지한다. 다만 이 완료 파일에 연결된 파일 해시만 제거해
-    같은 사진을 다시 올렸을 때 OCR 확인 후 완료 엑셀을 다시 만들 수 있게 한다.
-    """
-    batch_id = str(batch_id or "").strip()
-    if not batch_id:
-        return False, "삭제할 완료 파일 식별값이 없습니다."
-
-    with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        batches = history.get("batches", [])
-        target = next((b for b in batches if str(b.get("batch_id", "")) == batch_id), None)
-
-        if target is None:
-            return False, "이미 삭제되었거나 완료 파일을 찾을 수 없습니다."
-
-        filename = os.path.basename(str(target.get("snapshot_filename", "") or ""))
-        if filename:
-            snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
-            try:
-                if os.path.isfile(snapshot_path):
-                    os.remove(snapshot_path)
-            except Exception as e:
-                return False, f"완료 파일 삭제 실패: {e}"
-
-        history["batches"] = [
-            b for b in batches
-            if str(b.get("batch_id", "")) != batch_id
-        ]
-
-        # 삭제된 완료본에 포함된 사진은 다시 업로드해 완료 파일을 재생성할 수 있도록
-        # 파일 단위 처리 이력만 제거한다. 전체 누적 대장의 측정 행은 삭제하지 않는다.
-        processed_files = history.get("processed_files", {})
-        removable_hashes = [
-            file_hash for file_hash, meta in processed_files.items()
-            if str(meta.get("batch_id", "")) == batch_id
-        ]
-        for file_hash in removable_hashes:
-            processed_files.pop(file_hash, None)
-
-        save_heat_upload_history(history)
-
-    return True, "완료 파일을 삭제했습니다. 같은 사진을 다시 올리면 완료 엑셀을 재생성할 수 있습니다."
+def _batch_path(batch: dict) -> str:
+    filename = os.path.basename(str(batch.get("snapshot_filename", "") or ""))
+    return os.path.join(HEAT_EXPORT_HISTORY_DIR, filename) if filename else ""
 
 
 def _same_heat_number(a, b, field_name: str) -> bool:
@@ -3382,18 +3393,15 @@ def _same_heat_number(a, b, field_name: str) -> bool:
 
 
 def find_duplicate_heat_row(ws, row: dict) -> Optional[int]:
-    """파일 바이트가 달라도 장소·날짜·시간과 측정값이 같은 기록이면 중복으로 판단."""
+    """같은 시간대 파일 안에서 동일 시간·핵심값이 겹치면 한 번만 기록."""
     target_minutes = heat_time_to_minutes(row.get("측정시간"))
     if target_minutes is None:
         return None
-
     target_person = normalize_for_match(format_measurer(row.get("측정자", "")))
-
     for row_idx in range(6, 15):
         existing_minutes = heat_time_to_minutes(ws.cell(row=row_idx, column=3).value)
-        if existing_minutes != target_minutes:
+        if existing_minutes is None or existing_minutes != target_minutes:
             continue
-
         score = 0
         if _same_heat_number(ws.cell(row=row_idx, column=4).value, row.get("기온"), "기온"):
             score += 1
@@ -3401,482 +3409,458 @@ def find_duplicate_heat_row(ws, row: dict) -> Optional[int]:
             score += 1
         if _same_heat_number(ws.cell(row=row_idx, column=6).value, row.get("체감온도"), "체감온도"):
             score += 1
-
         existing_person = normalize_for_match(ws.cell(row=row_idx, column=7).value)
         if target_person and existing_person and target_person == existing_person:
             score += 1
-
-        # 동일 시간에 2개 이상의 핵심 값이 일치하면 같은 측정 기록으로 봄.
         if score >= 2:
             return row_idx
-
     return None
 
 
-def render_heat_completed_file_list():
-    """시간대별 완료 엑셀을 다운로드하거나 목록에서 개별 삭제."""
-    batches = get_heat_completed_batches()
-    st.markdown("##### 시간대별 완료 파일")
+def _save_record_to_batch_workbook(wb, template_ws, row: dict) -> Tuple[str, int, str, bool]:
+    location = row.get("측정위치", "미지정") or "미지정"
+    ws = get_or_create_heat_sheet(wb, template_ws, location, row.get("측정일자", ""))
+    duplicate_row = find_duplicate_heat_row(ws, row)
+    if duplicate_row is not None:
+        return ws.title, duplicate_row, "같은 시간대 파일 안의 중복 기록 건너뜀", True
 
-    if not batches:
-        st.caption("아직 시간대별 완료 파일이 없습니다.")
-        return
+    target_row = find_empty_heat_slot(ws, template_ws)
+    if target_row is None:
+        raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
-    st.caption(
-        f"완료 파일 {len(batches)}개 · 완료 파일을 삭제하면 해당 사진으로 다시 생성할 수 있습니다."
-    )
+    notes = []
+    row["측정자"] = format_measurer(row.get("측정자", ""))
+    if row.get("_measurer_unrecognized"):
+        notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
+    elif row.get("_measurer_inferred"):
+        notes.append("측정자 구역기준 자동보완")
+    notes.extend(build_heat_auto_notes(row, []))
 
-    for idx, batch in enumerate(batches):
-        created_at = batch.get("created_at", "")
-        source_files = [x for x in batch.get("source_files", []) if x]
-        source_text = ", ".join(source_files)
-        sheet_names = [x for x in batch.get("sheet_names", []) if x]
-        batch_id = str(batch.get("batch_id", "") or "")
+    new_min = heat_time_to_minutes(row.get("측정시간"))
+    if target_row > 6 and new_min is not None:
+        for prev_row in range(target_row - 1, 5, -1):
+            prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
+            if prev_min is not None:
+                if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
+                    notes.append(f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)")
+                break
+    if is_implausible_value(row.get("기온"), row.get("습도")):
+        notes.append("⚠️확인필요(비현실적 수치, OCR 오독 가능성 - 직접 확인 후 수정 필요)")
 
-        col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
-        with col_info:
-            st.markdown(f"**{created_at} 완료**")
-            reused_count = int(batch.get("reused_records_count", 0) or 0)
-            record_text = f"신규 기록 {batch.get('new_records_count', 0)}건"
-            if reused_count:
-                record_text += f" · 기존 기록 재사용 {reused_count}건"
-            st.caption(
-                f"업로드 파일 {batch.get('source_file_count', len(source_files))}개 · "
-                f"{record_text} · 시트 {len(sheet_names)}개"
-            )
-            if source_text:
-                st.caption(f"원본: {source_text}")
-
-        with col_download:
-            try:
-                with open(batch["snapshot_path"], "rb") as f:
-                    snapshot_bytes = f.read()
-                st.download_button(
-                    "다운로드",
-                    data=snapshot_bytes,
-                    file_name=batch.get("snapshot_filename", "체감온도측정_누적대장.xlsx"),
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key=f"heat_history_download_{batch_id or idx}",
-                )
-            except Exception as e:
-                st.caption(f"파일 읽기 실패: {e}")
-
-        with col_delete:
-            if st.button(
-                "삭제",
-                use_container_width=True,
-                key=f"heat_history_delete_{batch_id or idx}",
-            ):
-                ok, message = delete_heat_completed_batch(batch_id)
-                if ok:
-                    # 화면에 남아 있는 기존 업로드 캐시도 지워 재업로드가 즉시 가능하게 함.
-                    st.session_state.pop("heat_saved", None)
-                    st.session_state["heat_uploader_version"] = (
-                        int(st.session_state.get("heat_uploader_version", 0)) + 1
-                    )
-                    st.rerun()
-                else:
-                    st.error(message)
-
-        if idx < len(batches) - 1:
-            st.markdown("---")
+    note_text = " / ".join(notes)
+    ws.cell(target_row, 3, format_heat_time_display(row.get("측정시간", "")))
+    ws.cell(target_row, 4, _to_number(row.get("기온", "")))
+    ws.cell(target_row, 5, _to_number(row.get("습도", "")))
+    ws.cell(target_row, 6, _to_number(row.get("체감온도", "")))
+    ws.cell(target_row, 7, format_measurer(row.get("측정자", "")))
+    ws.cell(target_row, 8, note_text)
+    return ws.title, target_row, note_text, False
 
 
-def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str, bool]:
-    """측정 1건 저장. 같은 기록이면 새 행을 만들지 않고 기존 행을 반환."""
+def create_heat_time_batch_file(new_file_infos: List[dict], file_results: List[dict]) -> Optional[dict]:
+    """이번 업로드에서 인식한 기록만 담은 독립 엑셀 파일을 생성. 누적 대장은 만들지 않는다."""
+    if not new_file_infos:
+        return None
+
+    all_records = []
+    for result in file_results:
+        for record_index, record in enumerate(result.get("records", [])):
+            copied = dict(record)
+            copied["_source_hash"] = result["file_hash"]
+            copied["_source_name"] = result["file_name"]
+            copied["_source_index"] = record_index
+            all_records.append(copied)
+    if not all_records:
+        return None
+
+    all_records = prepare_heat_records_for_average(all_records)
+    all_records = optimize_records_near_two_hours(all_records)
     template_ws = load_heat_template_sheet()
     if template_ws is None:
-        raise ValueError(
-            f"템플릿 파일을 찾을 수 없습니다: {HEAT_TEMPLATE_XLSX} "
-            "(templates 폴더에 heat_index_template.xlsx를 추가해주세요)"
-        )
+        raise ValueError("체감온도 엑셀 템플릿을 찾지 못했습니다.")
+
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    entries = []
+    for record in all_records:
+        try:
+            sheet_name, row_number, note, duplicate = _save_record_to_batch_workbook(wb, template_ws, record)
+            entries.append({
+                "source_hash": record.get("_source_hash", ""),
+                "source_name": record.get("_source_name", ""),
+                "source_index": record.get("_source_index", 0),
+                "sheet": sheet_name,
+                "row": row_number,
+                "gap_note": note,
+                "values": record,
+                "duplicate": duplicate,
+                "error": None,
+            })
+        except Exception as error:
+            entries.append({
+                "source_hash": record.get("_source_hash", ""),
+                "source_name": record.get("_source_name", ""),
+                "source_index": record.get("_source_index", 0),
+                "sheet": None,
+                "row": None,
+                "gap_note": "",
+                "values": record,
+                "duplicate": False,
+                "error": str(error),
+            })
+
+    successful = [entry for entry in entries if not entry.get("error")]
+    if not successful:
+        return None
+
+    now = datetime.now()
+    file_hashes = sorted({info["file_hash"] for info in new_file_infos})
+    signature = hashlib.sha256("|".join(file_hashes).encode("utf-8")).hexdigest()
+    stamp = now.strftime("%Y%m%d_%H%M%S")
+    batch_id = f"{stamp}_{signature[:8]}"
+    filename = f"체감온도측정_시간대별_{stamp}.xlsx"
+    snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+    suffix = 2
+    while os.path.exists(snapshot_path):
+        filename = f"체감온도측정_시간대별_{stamp}_{suffix}.xlsx"
+        snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+        suffix += 1
+    wb.save(snapshot_path)
+
+    usage_total = _empty_heat_usage_summary()
+    for result in file_results:
+        for call in result.get("usage", {}).get("calls", []):
+            merge_heat_usage(usage_total, call)
+
+    batch = {
+        "batch_id": batch_id,
+        "batch_signature": signature,
+        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "snapshot_filename": filename,
+        "source_files": [info.get("original_name", "") for info in new_file_infos],
+        "source_file_count": len(new_file_infos),
+        "recognized_records_count": len(successful),
+        "sheet_names": sorted({entry.get("sheet", "") for entry in successful if entry.get("sheet")}),
+        "usage": usage_total,
+    }
 
     with _HEAT_HISTORY_LOCK:
-        if os.path.exists(HEAT_LOG_FILE):
-            wb = openpyxl.load_workbook(HEAT_LOG_FILE)
-        else:
-            wb = openpyxl.Workbook()
-            wb.remove(wb.active)
+        history = load_heat_upload_history()
+        history.setdefault("batches", []).append(batch)
+        for result in file_results:
+            meta = history["processed_files"].setdefault(result["file_hash"], {})
+            meta.update({
+                "status": "completed",
+                "processed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "records_count": len([entry for entry in successful if entry.get("source_hash") == result["file_hash"]]),
+                "batch_id": batch_id,
+                "usage": result.get("usage", {}),
+                "error": "",
+            })
+        save_heat_upload_history(history)
 
-        ws = get_or_create_heat_sheet(wb, template_ws, location, row["측정일자"])
-
-        # 기존 누적 대장 자체도 검사해, 파일명이 달라진 같은 사진/같은 측정값의 중복 저장을 막음.
-        duplicate_row = find_duplicate_heat_row(ws, row)
-        if duplicate_row is not None:
-            existing_note = str(ws.cell(row=duplicate_row, column=8).value or "").strip()
-            duplicate_note = "중복 기록 건너뜀(기존 기록 유지)"
-            display_note = " / ".join([x for x in [existing_note, duplicate_note] if x])
-            return ws.title, duplicate_row, display_note, True
-
-        target_row = find_empty_heat_slot(ws, template_ws)
-        if target_row is None:
-            raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
-
-        notes = []
-        row["측정자"] = format_measurer(row.get("측정자", ""))
-        if row.get("_measurer_unrecognized"):
-            notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
-
-        # 판독 공백 자동 보완: 같은 장소·날짜 평균을 우선 사용하고,
-        # 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용한다.
-        same_sheet_averages = get_heat_field_averages_from_sheet(ws)
-        same_date_averages = get_heat_field_averages_from_workbook_date(
-            wb, row["측정일자"], exclude_sheet=ws.title
-        )
-        _, _, unavailable_fields = fill_missing_heat_values(
-            row, same_sheet_averages, same_date_averages
-        )
-        notes.extend(build_heat_auto_notes(row, unavailable_fields))
-
-        new_min = heat_time_to_minutes(row["측정시간"])
-        if target_row > 6 and new_min is not None:
-            for prev_row in range(target_row - 1, 5, -1):
-                prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
-                if prev_min is not None:
-                    if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
-                        notes.append(f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)")
-                    break
-
-        if is_implausible_value(row["기온"], row["습도"]):
-            notes.append("⚠️확인필요(비현실적 수치, OCR 오독 가능성 - 직접 확인 후 수정 필요)")
-
-        gap_note = " / ".join(notes)
-
-        ws.cell(row=target_row, column=3, value=format_heat_time_display(row["측정시간"]))
-        ws.cell(row=target_row, column=4, value=_to_number(row["기온"]))
-        ws.cell(row=target_row, column=5, value=_to_number(row["습도"]))
-        ws.cell(row=target_row, column=6, value=_to_number(row["체감온도"]))
-        ws.cell(row=target_row, column=7, value=format_measurer(row["측정자"]))
-        ws.cell(row=target_row, column=8, value=gap_note)
-
-        wb.save(HEAT_LOG_FILE)
-        return ws.title, target_row, gap_note, False
+    batch["snapshot_path"] = snapshot_path
+    batch["entries"] = entries
+    return batch
 
 
-def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict) -> Tuple[dict, str]:
-    """이미 저장된 칸을 덮어씀. 수정 화면에서 값을 비워도 주변 평균으로 다시 보완."""
-    if not os.path.exists(HEAT_LOG_FILE):
-        raise ValueError("저장된 기록 파일이 없습니다.")
-    wb = openpyxl.load_workbook(HEAT_LOG_FILE)
+def finalize_heat_upload_error(file_hash: str, error: str):
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        meta = history["processed_files"].setdefault(file_hash, {"file_hash": file_hash})
+        meta.update({"status": "error", "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "error": str(error or "")})
+        save_heat_upload_history(history)
+
+
+def get_heat_completed_batches() -> List[dict]:
+    history = load_heat_upload_history()
+    batches = []
+    for batch in history.get("batches", []):
+        path = _batch_path(batch)
+        if path and os.path.isfile(path):
+            item = dict(batch)
+            item["snapshot_path"] = path
+            batches.append(item)
+    return sorted(batches, key=lambda item: item.get("created_at", ""), reverse=True)
+
+
+def delete_heat_completed_batch(batch_id: str) -> Tuple[bool, str]:
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        target = _find_batch_by_id(history, batch_id)
+        if target is None:
+            return False, "이미 삭제되었거나 파일을 찾을 수 없습니다."
+        path = _batch_path(target)
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except Exception as error:
+            return False, f"파일 삭제 실패: {error}"
+
+        history["batches"] = [batch for batch in history.get("batches", []) if str(batch.get("batch_id", "")) != str(batch_id)]
+        for file_hash in [key for key, meta in history.get("processed_files", {}).items() if str(meta.get("batch_id", "")) == str(batch_id)]:
+            history["processed_files"].pop(file_hash, None)
+        save_heat_upload_history(history)
+    return True, "시간대별 파일을 삭제했습니다."
+
+
+def get_heat_batch_download(batch_id: str) -> Optional[dict]:
+    history = load_heat_upload_history()
+    batch = _find_batch_by_id(history, batch_id)
+    if not batch:
+        return None
+    path = _batch_path(batch)
+    if not path or not os.path.isfile(path):
+        return None
+    item = dict(batch)
+    item["snapshot_path"] = path
+    return item
+
+
+def overwrite_heat_batch_row(batch_id: str, sheet_name: str, target_row: int, fields: dict) -> Tuple[dict, str]:
+    batch = get_heat_batch_download(batch_id)
+    if not batch:
+        raise ValueError("수정할 시간대별 엑셀 파일을 찾지 못했습니다.")
+    wb = openpyxl.load_workbook(batch["snapshot_path"])
     if sheet_name not in wb.sheetnames:
-        raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
+        raise ValueError(f"'{sheet_name}' 시트를 찾지 못했습니다.")
     ws = wb[sheet_name]
 
-    # 측정자는 지정된 11명만 저장하며 직책과 관계없이 이름 대원 형식으로 통일한다.
     raw_person = str(fields.get("측정자", "") or "").strip()
     normalized_person = format_measurer(raw_person)
     if raw_person and not normalized_person:
         raise ValueError("측정자는 지정된 11명 중 한 명만 입력할 수 있습니다.")
     fields["측정자"] = normalized_person
-
-    # 사용자가 수정 입력에서 빈 값을 남긴 경우에도 같은 장소·날짜 평균으로 보완한다.
     fields.pop("_average_filled", None)
     fields.pop("_heat_index_calculated", None)
     same_sheet_averages = get_heat_field_averages_from_sheet(ws, exclude_row=target_row)
+    _, _, unavailable = fill_missing_heat_values(fields, same_sheet_averages, {})
+    notes = clean_heat_auto_notes(ws.cell(target_row, 8).value)
+    notes.extend(build_heat_auto_notes(fields, unavailable))
+    note_text = " / ".join(notes)
 
-    date_match = re.search(r"_(\d{4})(?:_\d+)?$", sheet_name)
-    date_str = date_match.group(1) if date_match else ""
-    same_date_averages = get_heat_field_averages_from_workbook_date(
-        wb, date_str, exclude_sheet=sheet_name
-    )
-    _, _, unavailable_fields = fill_missing_heat_values(
-        fields, same_sheet_averages, same_date_averages
-    )
-
-    existing_notes = clean_heat_auto_notes(ws.cell(row=target_row, column=8).value)
-    existing_notes.extend(build_heat_auto_notes(fields, unavailable_fields))
-    note_text = " / ".join(existing_notes)
-
-    ws.cell(row=target_row, column=3, value=format_heat_time_display(fields["측정시간"]))
-    ws.cell(row=target_row, column=4, value=_to_number(fields["기온"]))
-    ws.cell(row=target_row, column=5, value=_to_number(fields["습도"]))
-    ws.cell(row=target_row, column=6, value=_to_number(fields["체감온도"]))
-    ws.cell(row=target_row, column=7, value=format_measurer(fields["측정자"]))
-    ws.cell(row=target_row, column=8, value=note_text)
-    wb.save(HEAT_LOG_FILE)
+    ws.cell(target_row, 3, format_heat_time_display(fields.get("측정시간", "")))
+    ws.cell(target_row, 4, _to_number(fields.get("기온", "")))
+    ws.cell(target_row, 5, _to_number(fields.get("습도", "")))
+    ws.cell(target_row, 6, _to_number(fields.get("체감온도", "")))
+    ws.cell(target_row, 7, normalized_person)
+    ws.cell(target_row, 8, note_text)
+    wb.save(batch["snapshot_path"])
     return fields, note_text
+
+
+def render_heat_completed_file_list():
+    batches = get_heat_completed_batches()
+    st.markdown("#### 시간대별 완료 파일")
+    if not batches:
+        st.caption("아직 생성된 시간대별 파일이 없습니다.")
+        return
+
+    for index, batch in enumerate(batches):
+        usage = batch.get("usage", {}) or {}
+        col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
+        with col_info:
+            st.markdown(f"**{batch.get('created_at', '')} 완료**")
+            st.caption(
+                f"업로드 {batch.get('source_file_count', 0)}개 · 기록 {batch.get('recognized_records_count', 0)}건 · "
+                f"시트 {len(batch.get('sheet_names', []))}개"
+            )
+            source_text = ", ".join([name for name in batch.get("source_files", []) if name])
+            if source_text:
+                st.caption(f"원본: {source_text}")
+            if usage:
+                st.caption(
+                    f"API: 입력 {usage.get('input_tokens', 0):,} · 출력 {usage.get('output_tokens', 0):,} 토큰 · "
+                    f"예상 ${float(usage.get('cost_usd', 0.0) or 0.0):.5f}"
+                )
+        with col_download:
+            with open(batch["snapshot_path"], "rb") as file:
+                data = file.read()
+            st.download_button(
+                "다운로드", data=data,
+                file_name=batch.get("snapshot_filename", "체감온도측정_시간대별.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key=f"heat_batch_download_{batch.get('batch_id', index)}",
+            )
+        with col_delete:
+            if st.button("삭제", use_container_width=True, key=f"heat_batch_delete_{batch.get('batch_id', index)}"):
+                ok, message = delete_heat_completed_batch(batch.get("batch_id", ""))
+                if ok:
+                    st.session_state.pop("heat_saved", None)
+                    st.session_state["heat_uploader_version"] = int(st.session_state.get("heat_uploader_version", 0)) + 1
+                    st.rerun()
+                st.error(message)
+        if index < len(batches) - 1:
+            st.markdown("---")
 
 
 def render_heat_index_log():
     st.markdown("---")
     st.markdown(
-        """
-        <h2 style="color:#e8590c; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">
-            체감온도 측정 기록
-        </h2>
-        """,
-        unsafe_allow_html=True
+        '<h2 style="color:#e8590c; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">체감온도 측정 기록</h2>',
+        unsafe_allow_html=True,
     )
 
     if openpyxl is None:
-        st.error("openpyxl 패키지가 설치되어 있지 않습니다. requirements.txt에 openpyxl을 추가해주세요.")
+        st.error("openpyxl 패키지가 설치되어 있지 않습니다.")
         return
-
     if not os.path.exists(HEAT_TEMPLATE_XLSX):
-        st.error(
-            "템플릿 파일이 없습니다. 저장소의 templates/heat_index_template.xlsx 위치에 "
-            "체감온도측정 대장 양식을 추가해주세요."
-        )
+        st.error("templates/heat_index_template.xlsx 파일이 없습니다.")
         return
-
     if "GPT_API_KEY" not in st.secrets:
-        st.error("Secrets에 GPT_API_KEY 설정이 필요합니다. (기존 번역 기능과 같은 키를 사용합니다)")
+        st.error("Secrets에 GPT_API_KEY 설정이 필요합니다.")
         return
 
     api_key = st.secrets["GPT_API_KEY"]
-
-    if "heat_saved" not in st.session_state:
-        st.session_state["heat_saved"] = {}
-    if "heat_uploader_version" not in st.session_state:
-        st.session_state["heat_uploader_version"] = 0
+    st.session_state.setdefault("heat_saved", {})
+    st.session_state.setdefault("heat_uploader_version", 0)
 
     heat_files = st.file_uploader(
         "측정 사진 업로드",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif"],
-        key=f"heat_index_uploader_{st.session_state['heat_uploader_version']}"
+        key=f"heat_index_uploader_{st.session_state['heat_uploader_version']}",
     )
 
-    new_file_infos = []
-    new_entries_for_snapshot = []
     render_items = []
+    new_file_infos = []
+    new_results = []
 
     if heat_files:
-        for f in heat_files:
-            file_hash, file_bytes = uploaded_file_hash(f)
-            session_key = file_hash
-
-            if session_key in st.session_state["heat_saved"]:
-                render_items.append(st.session_state["heat_saved"][session_key])
+        for uploaded in heat_files:
+            file_hash, file_bytes = uploaded_file_hash(uploaded)
+            if file_hash in st.session_state["heat_saved"]:
+                render_items.append(st.session_state["heat_saved"][file_hash])
                 continue
 
-            should_process, existing_meta = reserve_heat_upload(file_hash, f.name, len(file_bytes))
-
+            should_process, existing_meta = reserve_heat_upload(file_hash, uploaded.name, len(file_bytes))
             if not should_process:
-                item = {
-                    "file_hash": file_hash,
-                    "file_name": f.name,
-                    "duplicate_file": True,
-                    "meta": existing_meta,
-                    "entries": [],
-                }
-                st.session_state["heat_saved"][session_key] = item
+                item = {"file_hash": file_hash, "file_name": uploaded.name, "duplicate_file": True, "meta": existing_meta, "entries": []}
+                st.session_state["heat_saved"][file_hash] = item
                 render_items.append(item)
                 continue
 
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(file_bytes)
-                original_path = tmp.name
+            suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
+                temp.write(file_bytes)
+                original_path = temp.name
 
-            entries = []
             process_error = ""
-            with st.spinner(f"{f.name} 분석 및 자동저장 중..."):
+            records, usage = [], _empty_heat_usage_summary()
+            with st.spinner(f"{uploaded.name} 분석 중..."):
                 try:
-                    records = extract_heat_records_with_gpt(api_key, original_path)
-                    records = prepare_heat_records_for_average(records)
-
-                    for rec in records:
-                        try:
-                            sheet_name, target_row, gap_note, was_duplicate = save_heat_measurement(
-                                rec["측정위치"], rec
-                            )
-                            rec["측정시간"] = format_heat_time_display(rec["측정시간"])
-                            rec["측정자"] = format_measurer(rec["측정자"])
-                            entries.append({
-                                "sheet": sheet_name,
-                                "row": target_row,
-                                "gap_note": gap_note,
-                                "values": rec,
-                                "duplicate": was_duplicate,
-                                "error": None,
-                            })
-                        except Exception as e:
-                            entries.append({
-                                "sheet": None,
-                                "row": None,
-                                "gap_note": "",
-                                "values": rec,
-                                "duplicate": False,
-                                "error": str(e),
-                            })
-
-                    status = "completed" if records else "no_records"
-                    finalize_heat_upload(file_hash, status, entries)
-
-                except Exception as e:
-                    process_error = str(e)
-                    finalize_heat_upload(file_hash, "error", entries, error=process_error)
-
-            if os.path.exists(original_path):
-                try:
-                    os.remove(original_path)
-                except Exception:
-                    pass
+                    records, usage = extract_heat_records_with_gpt(api_key, original_path)
+                except Exception as error:
+                    process_error = str(error)
+                    finalize_heat_upload_error(file_hash, process_error)
+            try:
+                os.remove(original_path)
+            except Exception:
+                pass
 
             item = {
                 "file_hash": file_hash,
-                "file_name": f.name,
+                "file_name": uploaded.name,
                 "duplicate_file": False,
-                "meta": {
-                    "status": "error" if process_error else ("completed" if entries else "no_records"),
-                    "error": process_error,
-                },
-                "entries": entries,
+                "meta": {"status": "error" if process_error else "analyzed", "error": process_error, "usage": usage},
+                "records": records,
+                "entries": [],
             }
-            st.session_state["heat_saved"][session_key] = item
+            st.session_state["heat_saved"][file_hash] = item
             render_items.append(item)
-
             if not process_error:
-                new_file_infos.append({
-                    "file_hash": file_hash,
-                    "original_name": f.name,
-                })
-                new_entries_for_snapshot.extend(entries)
+                new_file_infos.append({"file_hash": file_hash, "original_name": uploaded.name})
+                new_results.append({"file_hash": file_hash, "file_name": uploaded.name, "records": records, "usage": usage})
 
-        # 한 번에 선택한 새 사진들을 하나의 시간대 완료 파일로 묶음.
-        created_batch = create_heat_batch_snapshot(new_file_infos, new_entries_for_snapshot)
+        created_batch = create_heat_time_batch_file(new_file_infos, new_results)
         if created_batch:
-            reused_count = int(created_batch.get("reused_records_count", 0) or 0)
-            result_text = f"신규 기록 {created_batch.get('new_records_count', 0)}건"
-            if reused_count:
-                result_text += f" · 기존 기록 재사용 {reused_count}건"
+            entries_by_hash = {}
+            for entry in created_batch.get("entries", []):
+                entries_by_hash.setdefault(entry.get("source_hash", ""), []).append(entry)
+            for item in render_items:
+                if item.get("file_hash") in entries_by_hash:
+                    item["entries"] = entries_by_hash[item["file_hash"]]
+                    item["meta"]["batch_id"] = created_batch["batch_id"]
+                    st.session_state["heat_saved"][item["file_hash"]] = item
             st.success(
-                f"시간대별 완료 파일 생성: {created_batch['created_at']} · {result_text}"
+                f"시간대별 엑셀 생성 완료: {created_batch.get('created_at', '')} · "
+                f"기록 {created_batch.get('recognized_records_count', 0)}건"
             )
+        elif new_file_infos and not any(result.get("records") for result in new_results):
+            st.warning("인식된 측정 기록이 없어 시간대별 엑셀을 만들지 못했습니다.")
 
         for item in render_items:
             file_name = item.get("file_name", "업로드 파일")
-
             if item.get("duplicate_file"):
                 meta = item.get("meta", {})
-                processed_at = meta.get("processed_at") or meta.get("started_at") or "이전 처리 시각"
-                records_count = meta.get("records_count", 0)
+                batch = get_heat_batch_download(meta.get("batch_id", ""))
                 with st.expander(f"♻️ {file_name} — 이미 처리된 파일", expanded=False):
-                    st.info(
-                        f"동일한 파일 내용이 {processed_at}에 이미 처리되어 새 행을 만들지 않았습니다. "
-                        f"기존 인식 기록: {records_count}건"
-                    )
-                    if os.path.exists(HEAT_LOG_FILE):
-                        with open(HEAT_LOG_FILE, "rb") as f:
-                            duplicate_master_bytes = f.read()
+                    st.info("동일한 사진은 다시 분석하지 않았습니다.")
+                    if batch:
+                        with open(batch["snapshot_path"], "rb") as file:
+                            data = file.read()
                         st.download_button(
-                            "현재 누적 대장 엑셀 다운로드",
-                            data=duplicate_master_bytes,
-                            file_name=f"체감온도측정_전체누적대장_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            "기존 시간대별 엑셀 다운로드", data=data,
+                            file_name=batch.get("snapshot_filename", "체감온도측정_시간대별.xlsx"),
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"heat_duplicate_master_download_{file_hash}",
+                            key=f"heat_duplicate_download_{item['file_hash']}",
                         )
                 continue
 
+            error = item.get("meta", {}).get("error", "")
             entries = item.get("entries", [])
-            meta = item.get("meta", {})
-            process_error = meta.get("error", "")
-
+            usage = item.get("meta", {}).get("usage", {}) or {}
             with st.expander(f"📷 {file_name} — {len(entries)}건 인식", expanded=True):
-                if process_error:
-                    st.error(f"분석 실패: {process_error}")
+                if error:
+                    st.error(f"분석 실패: {error}")
+                    continue
+                st.caption(
+                    f"API 입력 {usage.get('input_tokens', 0):,} · 출력 {usage.get('output_tokens', 0):,} 토큰 · "
+                    f"예상 ${float(usage.get('cost_usd', 0.0) or 0.0):.5f}"
+                )
+                if not entries:
+                    st.warning("이 사진에서 측정 기록을 찾지 못했습니다.")
                     continue
 
-                if not entries:
-                    st.warning("이 사진에서 측정 기록을 찾지 못했습니다. 같은 사진의 자동 반복 분석은 막았습니다.")
-
-                for i, entry in enumerate(entries):
-                    if entry["error"]:
-                        st.error(f"저장 실패: {entry['error']}")
+                batch_id = item.get("meta", {}).get("batch_id", "")
+                for entry_index, entry in enumerate(entries):
+                    if entry.get("error"):
+                        st.error(f"엑셀 기록 실패: {entry['error']}")
                         continue
+                    st.success(f"✅ '{entry['sheet']}' 시트 {entry['row'] - 5}번째 줄")
+                    if entry.get("gap_note"):
+                        if "⚠️" in entry["gap_note"]:
+                            st.error(entry["gap_note"])
+                        elif "간격초과" in entry["gap_note"]:
+                            st.warning(entry["gap_note"])
+                        else:
+                            st.info(entry["gap_note"])
 
-                    if entry.get("duplicate"):
-                        st.info(
-                            f"♻️ 기존 기록과 동일하여 새 행을 만들지 않음 → "
-                            f"'{entry['sheet']}' 시트 {entry['row']-5}번째 줄 유지"
-                        )
-                    else:
-                        st.success(f"✅ 자동저장됨 → '{entry['sheet']}' 시트 {entry['row']-5}번째 줄")
+                    values = entry["values"]
+                    left, right = st.columns(2)
+                    with left:
+                        st.caption(f"측정위치: {values.get('측정위치', '')} | 측정일자: {values.get('측정일자', '')}")
+                        new_time = st.text_input("측정시간", format_heat_time_display(values.get("측정시간", "")), key=f"heat_time_{item['file_hash']}_{entry_index}")
+                        new_temp = st.text_input("기온", values.get("기온", ""), key=f"heat_temp_{item['file_hash']}_{entry_index}")
+                    with right:
+                        new_humidity = st.text_input("습도", values.get("습도", ""), key=f"heat_humidity_{item['file_hash']}_{entry_index}")
+                        new_heat = st.text_input("체감온도", values.get("체감온도", ""), key=f"heat_feels_{item['file_hash']}_{entry_index}")
+                        new_person = st.text_input("측정자", values.get("측정자", ""), key=f"heat_person_{item['file_hash']}_{entry_index}")
 
-                    if "⚠️확인필요" in entry["gap_note"]:
-                        st.error(entry["gap_note"])
-                    elif "간격초과" in entry["gap_note"]:
-                        st.warning(entry["gap_note"])
-                    elif entry["gap_note"] and not entry.get("duplicate"):
-                        st.info(entry["gap_note"])
-
-                    wb_preview = openpyxl.load_workbook(HEAT_LOG_FILE)
-                    if entry["sheet"] in wb_preview.sheetnames:
-                        st.caption(
-                            f"오늘 이 장소 측정현황(4회 기준): "
-                            f"{get_slot_coverage_text(wb_preview[entry['sheet']])}"
-                        )
-
-                    # 중복으로 건너뛴 기존 행은 현재 업로드에서 수정하지 않음.
-                    if entry.get("duplicate"):
-                        continue
-
-                    v = entry["values"]
-                    ec1, ec2 = st.columns(2)
-                    with ec1:
-                        st.caption(f"측정위치: {v['측정위치']}  |  측정일자: {v['측정일자']}")
-                        new_time = st.text_input(
-                            "측정시간", v["측정시간"],
-                            key=f"heat_time_{item['file_hash']}_{i}"
-                        )
-                        new_temp = st.text_input(
-                            "기온", v["기온"],
-                            key=f"heat_temp_{item['file_hash']}_{i}"
-                        )
-                    with ec2:
-                        new_hum = st.text_input(
-                            "습도", v["습도"],
-                            key=f"heat_hum_{item['file_hash']}_{i}"
-                        )
-                        new_feels = st.text_input(
-                            "체감온도", v["체감온도"],
-                            key=f"heat_feels_{item['file_hash']}_{i}"
-                        )
-                        new_person = st.text_input(
-                            "측정자", v["측정자"],
-                            key=f"heat_person_{item['file_hash']}_{i}"
-                        )
-
-                    if st.button("수정 반영", key=f"heat_fix_{item['file_hash']}_{i}"):
-                        fixed = {
-                            "측정시간": new_time.strip(),
-                            "기온": new_temp.strip(),
-                            "습도": new_hum.strip(),
-                            "체감온도": new_feels.strip(),
-                            "측정자": new_person.strip(),
-                        }
+                    if st.button("수정 반영", key=f"heat_fix_{item['file_hash']}_{entry_index}"):
                         try:
-                            fixed, updated_note = overwrite_heat_row(entry["sheet"], entry["row"], fixed)
-                            fixed["측정시간"] = format_heat_time_display(fixed["측정시간"])
-                            fixed["측정자"] = format_measurer(fixed["측정자"])
+                            fixed, note = overwrite_heat_batch_row(batch_id, entry["sheet"], entry["row"], {
+                                "측정시간": new_time.strip(), "기온": new_temp.strip(), "습도": new_humidity.strip(),
+                                "체감온도": new_heat.strip(), "측정자": new_person.strip(),
+                            })
                             entry["values"].update(fixed)
-                            entry["gap_note"] = updated_note
-                            st.success("수정 반영되었습니다. 빈 측정값은 평균치로 자동 보완됩니다.")
-                        except Exception as e:
-                            st.error(f"수정 실패: {e}")
-
-    st.markdown("#### 누적 기록")
-    if os.path.exists(HEAT_LOG_FILE):
-        wb = openpyxl.load_workbook(HEAT_LOG_FILE)
-        st.caption(f"저장된 일자별 기록 시트: {', '.join(wb.sheetnames)}")
-
-        today_str = datetime.now().strftime("%Y%m%d")
-        with open(HEAT_LOG_FILE, "rb") as f:
-            master_bytes = f.read()
-        st.download_button(
-            "전체 누적 대장 엑셀 다운로드",
-            data=master_bytes,
-            file_name=f"체감온도측정_전체누적대장_{today_str}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key="heat_log_download_btn"
-        )
-    else:
-        st.info("아직 저장된 측정 기록이 없습니다.")
+                            entry["gap_note"] = note
+                            st.success("시간대별 엑셀 파일에 수정 반영했습니다.")
+                        except Exception as fix_error:
+                            st.error(f"수정 실패: {fix_error}")
 
     render_heat_completed_file_list()
-
 
 def main():
     install_playwright_browser()
