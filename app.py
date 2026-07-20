@@ -66,7 +66,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 LCD 자동확대·측정자명 보정 버전"
+APP_VERSION = "26년 7월 LCD 자동확대·완료파일 재생성 보정 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -3256,9 +3256,15 @@ def finalize_heat_upload(
 
 
 def create_heat_batch_snapshot(new_file_infos: List[dict], new_entries: List[dict]) -> Optional[dict]:
-    """이번 시간대에 새로 저장된 기록이 있을 때만 누적 엑셀 스냅샷 1개 생성."""
-    actual_new_entries = [e for e in new_entries if not e.get("error") and not e.get("duplicate")]
-    if not new_file_infos or not actual_new_entries or not os.path.exists(HEAT_LOG_FILE):
+    """이번 업로드에서 정상 인식된 기록이 있으면 누적 엑셀 스냅샷 1개 생성.
+
+    완료 파일을 삭제한 뒤 같은 사진을 다시 올린 경우에는 기존 행과 중복이더라도
+    전체 누적 대장을 다시 내려받을 수 있도록 완료 파일을 재생성한다.
+    """
+    successful_entries = [e for e in new_entries if not e.get("error")]
+    actual_new_entries = [e for e in successful_entries if not e.get("duplicate")]
+    reused_entries = [e for e in successful_entries if e.get("duplicate")]
+    if not new_file_infos or not successful_entries or not os.path.exists(HEAT_LOG_FILE):
         return None
 
     file_hashes = sorted({info["file_hash"] for info in new_file_infos})
@@ -3292,7 +3298,9 @@ def create_heat_batch_snapshot(new_file_infos: List[dict], new_entries: List[dic
             "source_files": [info.get("original_name", "") for info in new_file_infos],
             "source_file_count": len(new_file_infos),
             "new_records_count": len(actual_new_entries),
-            "sheet_names": sorted({e.get("sheet", "") for e in actual_new_entries if e.get("sheet")}),
+            "reused_records_count": len(reused_entries),
+            "recognized_records_count": len(successful_entries),
+            "sheet_names": sorted({e.get("sheet", "") for e in successful_entries if e.get("sheet")}),
         }
         history.setdefault("batches", []).append(batch)
 
@@ -3316,6 +3324,53 @@ def get_heat_completed_batches() -> List[dict]:
             item["snapshot_path"] = path
             batches.append(item)
     return sorted(batches, key=lambda x: x.get("created_at", ""), reverse=True)
+
+
+def delete_heat_completed_batch(batch_id: str) -> Tuple[bool, str]:
+    """시간대별 완료 파일과 목록을 삭제하고 해당 원본 사진의 재생성을 허용.
+
+    전체 누적 대장 행은 유지한다. 다만 이 완료 파일에 연결된 파일 해시만 제거해
+    같은 사진을 다시 올렸을 때 OCR 확인 후 완료 엑셀을 다시 만들 수 있게 한다.
+    """
+    batch_id = str(batch_id or "").strip()
+    if not batch_id:
+        return False, "삭제할 완료 파일 식별값이 없습니다."
+
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        batches = history.get("batches", [])
+        target = next((b for b in batches if str(b.get("batch_id", "")) == batch_id), None)
+
+        if target is None:
+            return False, "이미 삭제되었거나 완료 파일을 찾을 수 없습니다."
+
+        filename = os.path.basename(str(target.get("snapshot_filename", "") or ""))
+        if filename:
+            snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+            try:
+                if os.path.isfile(snapshot_path):
+                    os.remove(snapshot_path)
+            except Exception as e:
+                return False, f"완료 파일 삭제 실패: {e}"
+
+        history["batches"] = [
+            b for b in batches
+            if str(b.get("batch_id", "")) != batch_id
+        ]
+
+        # 삭제된 완료본에 포함된 사진은 다시 업로드해 완료 파일을 재생성할 수 있도록
+        # 파일 단위 처리 이력만 제거한다. 전체 누적 대장의 측정 행은 삭제하지 않는다.
+        processed_files = history.get("processed_files", {})
+        removable_hashes = [
+            file_hash for file_hash, meta in processed_files.items()
+            if str(meta.get("batch_id", "")) == batch_id
+        ]
+        for file_hash in removable_hashes:
+            processed_files.pop(file_hash, None)
+
+        save_heat_upload_history(history)
+
+    return True, "완료 파일을 삭제했습니다. 같은 사진을 다시 올리면 완료 엑셀을 재생성할 수 있습니다."
 
 
 def _same_heat_number(a, b, field_name: str) -> bool:
@@ -3359,7 +3414,7 @@ def find_duplicate_heat_row(ws, row: dict) -> Optional[int]:
 
 
 def render_heat_completed_file_list():
-    """시간대별로 생성된 누적 엑셀 완료본을 여러 개의 다운로드 목록으로 표시."""
+    """시간대별 완료 엑셀을 다운로드하거나 목록에서 개별 삭제."""
     batches = get_heat_completed_batches()
     st.markdown("##### 시간대별 완료 파일")
 
@@ -3368,7 +3423,7 @@ def render_heat_completed_file_list():
         return
 
     st.caption(
-        f"완료 파일 {len(batches)}개 · 같은 사진을 다시 올리면 새 파일이나 새 기록을 만들지 않습니다."
+        f"완료 파일 {len(batches)}개 · 완료 파일을 삭제하면 해당 사진으로 다시 생성할 수 있습니다."
     )
 
     for idx, batch in enumerate(batches):
@@ -3376,14 +3431,18 @@ def render_heat_completed_file_list():
         source_files = [x for x in batch.get("source_files", []) if x]
         source_text = ", ".join(source_files)
         sheet_names = [x for x in batch.get("sheet_names", []) if x]
+        batch_id = str(batch.get("batch_id", "") or "")
 
-        col_info, col_download = st.columns([5.0, 1.25])
+        col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
         with col_info:
             st.markdown(f"**{created_at} 완료**")
+            reused_count = int(batch.get("reused_records_count", 0) or 0)
+            record_text = f"신규 기록 {batch.get('new_records_count', 0)}건"
+            if reused_count:
+                record_text += f" · 기존 기록 재사용 {reused_count}건"
             st.caption(
                 f"업로드 파일 {batch.get('source_file_count', len(source_files))}개 · "
-                f"신규 기록 {batch.get('new_records_count', 0)}건 · "
-                f"시트 {len(sheet_names)}개"
+                f"{record_text} · 시트 {len(sheet_names)}개"
             )
             if source_text:
                 st.caption(f"원본: {source_text}")
@@ -3398,10 +3457,27 @@ def render_heat_completed_file_list():
                     file_name=batch.get("snapshot_filename", "체감온도측정_누적대장.xlsx"),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True,
-                    key=f"heat_history_download_{batch.get('batch_id', idx)}",
+                    key=f"heat_history_download_{batch_id or idx}",
                 )
             except Exception as e:
                 st.caption(f"파일 읽기 실패: {e}")
+
+        with col_delete:
+            if st.button(
+                "삭제",
+                use_container_width=True,
+                key=f"heat_history_delete_{batch_id or idx}",
+            ):
+                ok, message = delete_heat_completed_batch(batch_id)
+                if ok:
+                    # 화면에 남아 있는 기존 업로드 캐시도 지워 재업로드가 즉시 가능하게 함.
+                    st.session_state.pop("heat_saved", None)
+                    st.session_state["heat_uploader_version"] = (
+                        int(st.session_state.get("heat_uploader_version", 0)) + 1
+                    )
+                    st.rerun()
+                else:
+                    st.error(message)
 
         if idx < len(batches) - 1:
             st.markdown("---")
@@ -3552,19 +3628,14 @@ def render_heat_index_log():
 
     if "heat_saved" not in st.session_state:
         st.session_state["heat_saved"] = {}
-
-    st.caption(
-        "실제 온습도계 LCD가 작거나 흐리면 LCD 후보 영역을 자동 탐색해 크게 확대하고 원본·강화본과 교차 판독합니다. "
-        "그래도 기온·습도·체감온도가 비면 같은 장소·같은 날짜의 정상 측정값 평균으로 자동 기입합니다. "
-        "같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용하며, "
-        "같은 사진은 파일명이 바뀌어도 실제 파일 내용 기준으로 중복 처리하지 않습니다. 측정자는 지정된 11명만 이름 대원 형식으로 저장합니다."
-    )
+    if "heat_uploader_version" not in st.session_state:
+        st.session_state["heat_uploader_version"] = 0
 
     heat_files = st.file_uploader(
-        "측정 사진 업로드 (카톡 캡쳐 등, 여러 건이 섞여 있어도 됩니다)",
+        "측정 사진 업로드",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif"],
-        key="heat_index_uploader"
+        key=f"heat_index_uploader_{st.session_state['heat_uploader_version']}"
     )
 
     new_file_infos = []
@@ -3667,9 +3738,12 @@ def render_heat_index_log():
         # 한 번에 선택한 새 사진들을 하나의 시간대 완료 파일로 묶음.
         created_batch = create_heat_batch_snapshot(new_file_infos, new_entries_for_snapshot)
         if created_batch:
+            reused_count = int(created_batch.get("reused_records_count", 0) or 0)
+            result_text = f"신규 기록 {created_batch.get('new_records_count', 0)}건"
+            if reused_count:
+                result_text += f" · 기존 기록 재사용 {reused_count}건"
             st.success(
-                f"시간대별 완료 파일 생성: {created_batch['created_at']} · "
-                f"신규 기록 {created_batch['new_records_count']}건"
+                f"시간대별 완료 파일 생성: {created_batch['created_at']} · {result_text}"
             )
 
         for item in render_items:
@@ -3681,9 +3755,19 @@ def render_heat_index_log():
                 records_count = meta.get("records_count", 0)
                 with st.expander(f"♻️ {file_name} — 이미 처리된 파일", expanded=False):
                     st.info(
-                        f"동일한 파일 내용이 {processed_at}에 이미 처리되어 다시 저장하지 않았습니다. "
+                        f"동일한 파일 내용이 {processed_at}에 이미 처리되어 새 행을 만들지 않았습니다. "
                         f"기존 인식 기록: {records_count}건"
                     )
+                    if os.path.exists(HEAT_LOG_FILE):
+                        with open(HEAT_LOG_FILE, "rb") as f:
+                            duplicate_master_bytes = f.read()
+                        st.download_button(
+                            "현재 누적 대장 엑셀 다운로드",
+                            data=duplicate_master_bytes,
+                            file_name=f"체감온도측정_전체누적대장_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"heat_duplicate_master_download_{file_hash}",
+                        )
                 continue
 
             entries = item.get("entries", [])
