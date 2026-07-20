@@ -20,7 +20,7 @@ from difflib import SequenceMatcher
 
 import requests
 import streamlit as st
-from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+from PIL import Image, ImageOps, ImageEnhance, ImageFilter, ImageStat
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from pptx.util import Pt
@@ -66,7 +66,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 5월 버전"
+APP_VERSION = "26년 7월 LCD 자동확대·측정자명 보정 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -2197,17 +2197,35 @@ def calc_heat_index(Ta: float, RH: float) -> float:
     return round(hi, 1)
 
 
-def image_to_data_url(image_path: str, max_dim: int = 2000, quality: int = 88) -> str:
-    """GPT Vision 전송용으로 이미지를 적당히 축소 압축 후 base64 data URL로 변환."""
-    img = Image.open(image_path)
-    img = ImageOps.exif_transpose(img)
+def pil_image_to_data_url(
+    img: Image.Image,
+    max_dim: int = 2600,
+    min_dim: int = 1600,
+    quality: int = 94,
+) -> str:
+    """PIL 이미지를 GPT Vision용 data URL로 변환.
+
+    작은 LCD 사진은 숫자 세그먼트가 뭉개지지 않도록 확대하고,
+    큰 이미지는 메모리/전송량 보호를 위해 축소한다.
+    """
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    longest = max(img.width, img.height)
-    if longest > max_dim:
+    width, height = img.size
+    longest = max(width, height)
+
+    if longest < min_dim:
+        scale = min_dim / max(1, longest)
+        img = img.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.LANCZOS,
+        )
+    elif longest > max_dim:
         scale = max_dim / longest
-        img = img.resize((int(img.width * scale), int(img.height * scale)), Image.LANCZOS)
+        img = img.resize(
+            (max(1, int(width * scale)), max(1, int(height * scale))),
+            Image.LANCZOS,
+        )
 
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality, optimize=True)
@@ -2215,43 +2233,407 @@ def image_to_data_url(image_path: str, max_dim: int = 2000, quality: int = 88) -
     return f"data:image/jpeg;base64,{b64}"
 
 
+def image_to_data_url(image_path: str, max_dim: int = 2400, quality: int = 92) -> str:
+    """GPT Vision 전송용 원본 이미지 data URL.
+
+    이전보다 작은 사진을 적극적으로 확대해 실제 온습도계 LCD 숫자를
+    바로 판독할 수 있도록 한다.
+    """
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    return pil_image_to_data_url(
+        img,
+        max_dim=max_dim,
+        min_dim=1600,
+        quality=quality,
+    )
+
+
+def _heat_rect_iou(a, b) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+    area_b = max(1, (bx2 - bx1) * (by2 - by1))
+    return inter / max(1, area_a + area_b - inter)
+
+
+def detect_heat_lcd_candidate_crops(img: Image.Image, max_candidates: int = 3) -> List[Image.Image]:
+    """사진에서 LCD로 보이는 고대비 직사각형 영역을 자동 탐색해 확대용 크롭을 반환."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    original_w, original_h = img.size
+    if original_w < 80 or original_h < 80:
+        return []
+
+    preview = img.copy()
+    preview.thumbnail((720, 720), Image.LANCZOS)
+    pw, ph = preview.size
+
+    gray = ImageOps.autocontrast(preview.convert("L"), cutoff=1)
+    edges = ImageOps.autocontrast(gray.filter(ImageFilter.FIND_EDGES), cutoff=1)
+
+    candidates = []
+    for width_ratio in (0.14, 0.19, 0.25, 0.33, 0.43):
+        win_w = max(70, int(pw * width_ratio))
+        for aspect in (0.9, 1.15, 1.45, 1.8):
+            win_h = max(55, int(win_w / aspect))
+            if win_w >= pw or win_h >= ph:
+                continue
+
+            step = max(26, int(min(win_w, win_h) * 0.42))
+            y_positions = list(range(0, max(1, ph - win_h + 1), step))
+            x_positions = list(range(0, max(1, pw - win_w + 1), step))
+            if not y_positions or y_positions[-1] != ph - win_h:
+                y_positions.append(ph - win_h)
+            if not x_positions or x_positions[-1] != pw - win_w:
+                x_positions.append(pw - win_w)
+
+            for y1 in y_positions:
+                for x1 in x_positions:
+                    box = (x1, y1, x1 + win_w, y1 + win_h)
+                    edge_stat = ImageStat.Stat(edges.crop(box))
+                    gray_stat = ImageStat.Stat(gray.crop(box))
+                    edge_mean = edge_stat.mean[0]
+                    contrast = gray_stat.stddev[0]
+                    brightness = gray_stat.mean[0]
+
+                    cx = (x1 + win_w / 2) / max(1, pw)
+                    cy = (y1 + win_h / 2) / max(1, ph)
+                    center_bonus = max(0.0, 1.0 - ((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5 * 1.4)
+                    brightness_penalty = 8.0 if brightness < 18 or brightness > 242 else 0.0
+                    score = edge_mean * 0.72 + contrast * 0.78 + center_bonus * 7.0 - brightness_penalty
+                    candidates.append((score, box))
+
+    selected = []
+    for score, box in sorted(candidates, key=lambda x: x[0], reverse=True):
+        if any(_heat_rect_iou(box, prev_box) > 0.35 for _, prev_box in selected):
+            continue
+        selected.append((score, box))
+        if len(selected) >= max_candidates:
+            break
+
+    scale_x = original_w / max(1, pw)
+    scale_y = original_h / max(1, ph)
+    crops = []
+    for _, (x1, y1, x2, y2) in selected:
+        ox1, oy1 = int(x1 * scale_x), int(y1 * scale_y)
+        ox2, oy2 = int(x2 * scale_x), int(y2 * scale_y)
+        pad_x = int((ox2 - ox1) * 0.18)
+        pad_y = int((oy2 - oy1) * 0.22)
+        ox1, oy1 = max(0, ox1 - pad_x), max(0, oy1 - pad_y)
+        ox2, oy2 = min(original_w, ox2 + pad_x), min(original_h, oy2 + pad_y)
+        if ox2 - ox1 >= 50 and oy2 - oy1 >= 40:
+            crops.append(img.crop((ox1, oy1, ox2, oy2)))
+    return crops
+
+
+def make_heat_meter_vision_images(image_path: str) -> List[str]:
+    """LCD 자동 탐색 영역과 원본 보정본을 생성해 흐린 실측기 숫자를 재판독."""
+    img = Image.open(image_path)
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    variants = [img.copy()]
+
+    # 전체 사진 강화본: 카카오톡 캡처의 이름·시간·위치 문맥도 유지한다.
+    full_enhanced = ImageOps.autocontrast(img, cutoff=1)
+    full_enhanced = ImageEnhance.Contrast(full_enhanced).enhance(1.40)
+    full_enhanced = ImageEnhance.Sharpness(full_enhanced).enhance(3.0)
+    full_enhanced = full_enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175, threshold=2))
+    variants.append(full_enhanced)
+
+    # 계기가 사진 중앙에 있는 일반적인 경우를 위한 넓은 문맥 확대본.
+    # 자동 후보가 숫자 일부만 잡아도 온도·습도 화면 전체를 함께 확인할 수 있다.
+    w, h = img.size
+    if w >= 100 and h >= 100:
+        context_crop = img.crop((int(w * 0.03), int(h * 0.02), int(w * 0.97), int(h * 0.86)))
+        context_crop = ImageOps.autocontrast(context_crop, cutoff=1)
+        context_crop = ImageEnhance.Contrast(context_crop).enhance(1.42)
+        context_crop = ImageEnhance.Sharpness(context_crop).enhance(3.2)
+        variants.append(context_crop)
+
+    # 사진에서 LCD 가능성이 높은 영역을 자동 탐색해 크게 확대한다.
+    lcd_crops = detect_heat_lcd_candidate_crops(img, max_candidates=2)
+    for crop_index, crop in enumerate(lcd_crops):
+        crop = ImageOps.autocontrast(crop, cutoff=1)
+        crop = ImageEnhance.Contrast(crop).enhance(1.55)
+        crop = ImageEnhance.Sharpness(crop).enhance(3.8)
+        crop = crop.filter(ImageFilter.UnsharpMask(radius=2, percent=210, threshold=1))
+        variants.append(crop)
+
+        # 최우선 후보는 흑백 세그먼트 강화본도 추가한다.
+        if crop_index == 0:
+            gray = ImageOps.autocontrast(crop.convert("L"), cutoff=1)
+            gray = ImageEnhance.Contrast(gray).enhance(1.85)
+            gray = ImageEnhance.Sharpness(gray).enhance(3.4)
+            variants.append(gray.convert("RGB"))
+
+    data_urls = []
+    seen_hashes = set()
+    for variant in variants:
+        try:
+            thumb = variant.copy()
+            thumb.thumbnail((160, 160))
+            key_buf = io.BytesIO()
+            thumb.save(key_buf, format="PNG")
+            key = hashlib.sha256(key_buf.getvalue()).hexdigest()
+            if key in seen_hashes:
+                continue
+            seen_hashes.add(key)
+
+            data_urls.append(
+                pil_image_to_data_url(
+                    variant,
+                    max_dim=3000,
+                    min_dim=2200,
+                    quality=95,
+                )
+            )
+        except Exception:
+            continue
+
+    return data_urls[:6]
+
+
 HEAT_EXTRACT_PROMPT = """이 이미지는 건설현장 체감온도 측정 기록 사진이다. 카카오톡 대화 캡쳐처럼
 서로 다른 위치/시각의 측정 기록이 한 장에 여러 건 섞여 있을 수 있다. 각 기록을 구분해서 각각 하나의
 JSON 객체로 만들어라.
 
 각 기록에서 다음을 추출하라:
-- 측정자: 말풍선 위에 표시된 카카오톡 발신자 이름 등 측정한 사람의 실제 이름만 (직함/부서명 등은 제외)
+- 측정자: 다음 11명 중 이미지에서 확인되는 이름만 적는다: 김판식, 장경배, 박대우, 김종기, 송성태, 손만준, 조운제, 이용영, 방선혁, 공병대, 김명수. 직함은 제외한다. 명단 외 이름이거나 불확실하면 빈 문자열로 둔다.
 - 측정위치: 사진 캡션이나 근처 텍스트에 명시된 현장/구역/동 이름
 - 측정일자: 이미지에 날짜가 명시적으로 보이는 경우에만 YYYY-MM-DD 형식으로. 안 보이면 빈 문자열.
 - 측정시간: 말풍선 옆 시각(오전/오후 표기 가능)을 24시간제 HH:MM으로 변환. 안 보이면 빈 문자열.
-- 기온: 온습도계 LCD 화면에 표시된 숫자만 (단위 제외)
-- 습도: 온습도계 LCD 화면에 표시된 숫자만 (단위 제외)
+- 기온: 실제 온습도계 LCD의 위쪽 큰 숫자. 소수점과 ℃를 확인하고 숫자만 적는다.
+- 습도: 실제 온습도계 LCD의 아래쪽 큰 숫자. % 표시와 가까운 숫자만 적는다.
 - 체감온도: 계산기 화면 등에 명확히 숫자로 표시된 경우에만. 안 보이면 빈 문자열 (직접 계산하거나 추측하지 마라).
+- 기온확신도: LCD 기온 판독 확신도를 0~1 숫자로 표시한다.
+- 습도확신도: LCD 습도 판독 확신도를 0~1 숫자로 표시한다.
+
+실제 측정기 판독 규칙:
+- 사진 설명글이나 채팅 문구에 적힌 숫자보다 온습도계 LCD에 실제 표시된 값을 우선한다.
+- 일반적인 온습도계는 위쪽 큰 숫자가 기온(℃), 아래쪽 큰 숫자가 습도(%)다.
+- 화면 왼쪽 아래의 작은 3~4자리 숫자는 시각이나 보조표시일 수 있으므로 습도로 읽지 마라.
+- 예를 들어 위쪽에 30.0℃, 아래쪽에 63%가 보이면 기온 30.0, 습도 63으로 읽는다.
+- 기온 소수점이 흐리더라도 300으로 쓰지 말고 LCD 배치와 ℃ 표시를 확인해 30.0처럼 판독한다.
+- 습도 숫자 뒤에 % 표시가 붙어 있는지 확인한다.
 
 판독 정확도 관련 유의사항:
-- LCD 숫자 표시는 세그먼트 특성상 숫자가 헷갈리기 쉽다(예: 2↔7, 3↔8, 1↔7). 각 자릿수를 신중히 다시 확인하라.
-- 한국 건설현장의 여름철 기온은 대체로 15~40℃, 습도는 20~100% 범위다. 이 범위를 크게 벗어나는 값이 읽히면
-  오독 가능성이 높으니 이미지를 다시 확인하되, 그래도 화면에 그렇게 표시되어 있다면 읽은 그대로 적어라
-  (임의로 다른 값으로 바꾸지 마라 - 실제로 이례적인 수치일 수도 있다).
-
-중요: 불확실하거나 이미지에서 명확히 보이지 않는 값은 빈 문자열("")로 남겨라. 절대 추측해서 채우지 마라.
+- LCD 숫자는 세그먼트 특성상 2↔7, 3↔8, 1↔7, 6↔8, 0↔8이 헷갈릴 수 있다.
+  각 자릿수의 켜진 막대를 다시 비교해 판독하라.
+- 반사광, 원거리 촬영, 저화질 때문에 값이 흐려도 먼저 자동 탐색·확대된 LCD 후보 영역을 원본과 대조해 실제 표시값을 읽어보라.
+- 한국 건설현장의 여름철 기온은 대체로 15~40℃, 습도는 20~100% 범위다. 범위를 크게 벗어나면
+  오독 가능성을 다시 확인하되, 화면에 분명히 표시된 값이라면 읽은 그대로 적어라.
+- 끝까지 구분할 수 없는 값만 빈 문자열("")로 남겨라. 단순히 조금 흐리다는 이유로 바로 포기하지 마라.
 
 아래 JSON 배열 형식으로만 출력하라. 설명, 코드블록, 다른 텍스트를 절대 포함하지 마라.
 [
-  {"측정자":"", "측정위치":"", "측정일자":"", "측정시간":"", "기온":"", "습도":"", "체감온도":""}
+  {"측정자":"", "측정위치":"", "측정일자":"", "측정시간":"", "기온":"", "습도":"", "체감온도":"", "기온확신도":0.0, "습도확신도":0.0}
 ]
 
 기록이 하나도 없으면 빈 배열 []만 출력하라."""
 
 
+HEAT_METER_RETRY_PROMPT = """여러 입력 이미지는 모두 동일한 원본 사진 또는 프로그램이 자동 탐색해 크게 확대한 LCD 후보 영역이다.
+서로 다른 사진으로 세지 말고, 같은 온습도계를 중복해서 기록하지 마라.
+
+사진 속 실제 디지털 온습도계 LCD를 직접 판독하라. 채팅 문구나 주변 텍스트가 아니라 LCD 실측값이 기준이다.
+- 위쪽 큰 숫자 + ℃ 표시 = 기온
+- 아래쪽 큰 숫자 + % 표시 = 습도
+- 왼쪽 아래의 작은 시각/보조 숫자는 습도가 아니다.
+- 소수점을 반드시 확인한다. 예: 30.0℃를 300 또는 30으로 잘못 읽지 마라.
+- 7세그먼트 숫자의 2/7, 3/8, 1/7, 6/8, 0/8을 켜진 막대 모양으로 비교한다.
+- 원본, 색상 강화본, 흑백 강화본, 확대본을 서로 대조해 가장 일치하는 값을 선택한다.
+- 한 원본 안에 측정기가 여러 개면 화면 위에서 아래, 왼쪽에서 오른쪽 순서로 각각 반환한다.
+- 끝까지 판독 불가능한 항목만 빈 문자열로 둔다. 평균값이나 일반적인 값을 추측해서 넣지 마라.
+
+다음 JSON 배열만 출력하라.
+[
+  {"기온":"", "습도":"", "기온확신도":0.0, "습도확신도":0.0}
+]
+
+측정기를 찾지 못하면 []만 출력하라."""
+
+
+def _extract_openai_output_text(data: dict) -> str:
+    text = ""
+    if data.get("output_text"):
+        return str(data.get("output_text") or "")
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                text += str(content.get("text", "") or "")
+    return text
+
+
+def _safe_confidence(value, default: float = 0.0) -> float:
+    try:
+        confidence = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0.0, min(1.0, confidence))
+
+
+def parse_heat_meter_retry_response(text: str) -> List[dict]:
+    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        cleaned = re.sub(r"[\x00-\x1F]+", " ", cleaned)
+        match = re.search(r"\[.*\]", cleaned, re.S)
+        parsed = json.loads(match.group(0)) if match else []
+
+    if not isinstance(parsed, list):
+        parsed = [parsed]
+
+    results = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "기온": str(item.get("기온", "") or "").strip(),
+            "습도": str(item.get("습도", "") or "").strip(),
+            "기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
+            "습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
+        })
+    return results
+
+
+def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> List[dict]:
+    """흐리거나 작은 실제 측정기 LCD를 확대·보정 이미지로 한 번 더 판독."""
+    image_urls = make_heat_meter_vision_images(image_path)
+    if not image_urls:
+        return []
+
+    content = [{"type": "input_text", "text": HEAT_METER_RETRY_PROMPT}]
+    content.extend({"type": "input_image", "image_url": url} for url in image_urls)
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "input": [{"role": "user", "content": content}],
+    }
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=75,
+    )
+    if response.status_code != 200:
+        return []
+
+    return parse_heat_meter_retry_response(_extract_openai_output_text(response.json()))
+
+
+def heat_record_needs_meter_retry(record: dict) -> bool:
+    temp = parse_heat_number(record.get("기온"), "기온")
+    humidity = parse_heat_number(record.get("습도"), "습도")
+    temp_conf = _safe_confidence(record.get("_기온확신도"), 0.0)
+    hum_conf = _safe_confidence(record.get("_습도확신도"), 0.0)
+
+    if temp is None or humidity is None:
+        return True
+    if temp_conf < 0.82 or hum_conf < 0.82:
+        return True
+    return False
+
+
+def _replace_meter_field(record: dict, retry: dict, field: str, direct_photo: bool = False):
+    confidence_key = f"_{field}확신도"
+    retry_confidence_key = f"{field}확신도"
+
+    old_value = parse_heat_number(record.get(field), field)
+    new_value = parse_heat_number(retry.get(field), field)
+    if new_value is None:
+        return
+
+    old_conf = _safe_confidence(record.get(confidence_key), 0.0)
+    new_conf = _safe_confidence(retry.get(retry_confidence_key), 0.0)
+
+    should_replace = False
+    if old_value is None:
+        should_replace = True
+    elif old_conf < 0.82 and new_conf >= old_conf:
+        should_replace = True
+    elif direct_photo and new_conf >= 0.90 and new_conf > old_conf:
+        # 측정기 단독 사진은 재판독 결과가 더 확실하면 기존 값도 교정한다.
+        should_replace = True
+
+    if should_replace:
+        record[field] = str(int(new_value)) if field == "습도" and new_value.is_integer() else str(new_value)
+        record[confidence_key] = new_conf
+        record["_meter_retry_used"] = True
+
+
+def merge_heat_meter_retry(records: List[dict], retry_values: List[dict]) -> List[dict]:
+    """1차 구조화 결과에 LCD 전용 재판독값을 안전하게 합침."""
+    if not retry_values:
+        return records
+
+    # 온습도계 사진만 단독으로 올린 경우에도 기록 1건을 생성한다.
+    if not records:
+        return [{
+            "측정자": "",
+            "측정위치": "",
+            "측정일자": "",
+            "측정시간": "",
+            "기온": item.get("기온", ""),
+            "습도": item.get("습도", ""),
+            "체감온도": "",
+            "_기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
+            "_습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
+            "_meter_retry_used": True,
+        } for item in retry_values]
+
+    direct_photo = (
+        len(records) == 1
+        and not records[0].get("측정자")
+        and not records[0].get("측정위치")
+        and not records[0].get("측정일자")
+        and not records[0].get("측정시간")
+    )
+
+    if len(records) == len(retry_values):
+        pairs = list(zip(range(len(records)), retry_values))
+    else:
+        retry_indexes = [
+            idx for idx, record in enumerate(records)
+            if heat_record_needs_meter_retry(record)
+        ]
+        pairs = list(zip(retry_indexes, retry_values))
+
+    for record_index, retry in pairs:
+        record = records[record_index]
+        _replace_meter_field(record, retry, "기온", direct_photo=direct_photo)
+        _replace_meter_field(record, retry, "습도", direct_photo=direct_photo)
+
+        # 기온 또는 습도가 재판독으로 바뀌었다면 기존 체감온도는 공식으로 다시 산출하도록 비운다.
+        if record.get("_meter_retry_used"):
+            record["체감온도"] = ""
+
+    return records
+
+
 def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
-    """사진 1장에서 체감온도 측정 기록 N건을 GPT-4o-mini Vision으로 구조화 추출."""
+    """사진 1장에서 기록을 추출하고, 흐린 LCD는 확대·보정 후 자동 재판독."""
     url = "https://api.openai.com/v1/responses"
     data_url = image_to_data_url(image_path)
 
     headers = {
         "Authorization": f"Bearer {api_key.strip()}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     payload = {
         "model": "gpt-4o-mini",
@@ -2260,38 +2642,45 @@ def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
                 "role": "user",
                 "content": [
                     {"type": "input_text", "text": HEAT_EXTRACT_PROMPT},
-                    {"type": "input_image", "image_url": data_url}
-                ]
+                    {"type": "input_image", "image_url": data_url},
+                ],
             }
-        ]
+        ],
     }
 
-    resp = requests.post(url, headers=headers, json=payload, timeout=60)
-    if resp.status_code != 200:
-        raise Exception(f"API Error: {resp.text}")
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
 
-    data = resp.json()
-    text = ""
-    if "output_text" in data and data["output_text"]:
-        text = data["output_text"]
-    else:
-        for item in data.get("output", []):
-            for c in item.get("content", []):
-                if c.get("type") == "output_text":
-                    text += c.get("text", "")
+    records = parse_heat_gpt_response(_extract_openai_output_text(response.json()))
 
-    return parse_heat_gpt_response(text)
+    # 값이 비거나 확신도가 낮은 경우에만 LCD 전용 2차 판독을 실행한다.
+    # 온습도계 단독 사진도 실제 LCD 값을 재확인한다.
+    direct_photo = (
+        len(records) == 1
+        and not records[0].get("측정자")
+        and not records[0].get("측정위치")
+        and not records[0].get("측정일자")
+        and not records[0].get("측정시간")
+    )
+    needs_retry = not records or any(heat_record_needs_meter_retry(r) for r in records) or direct_photo
+
+    if needs_retry:
+        retry_values = extract_heat_meter_values_with_gpt(api_key, image_path)
+        records = merge_heat_meter_retry(records, retry_values)
+
+    return records
 
 
 def parse_heat_gpt_response(text: str) -> List[dict]:
     """GPT 응답 텍스트를 JSON 배열로 파싱 (코드블록/잡텍스트 방어)."""
-    cleaned = text.replace("```json", "").replace("```", "").strip()
+    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
     try:
         parsed = json.loads(cleaned)
     except Exception:
-        cleaned = re.sub(r'[\x00-\x1F]+', ' ', cleaned)
-        m = re.search(r'\[.*\]', cleaned, re.S)
-        parsed = json.loads(m.group(0)) if m else []
+        cleaned = re.sub(r"[\x00-\x1F]+", " ", cleaned)
+        match = re.search(r"\[.*\]", cleaned, re.S)
+        parsed = json.loads(match.group(0)) if match else []
 
     if not isinstance(parsed, list):
         parsed = [parsed]
@@ -2308,6 +2697,8 @@ def parse_heat_gpt_response(text: str) -> List[dict]:
             "기온": str(item.get("기온", "") or "").strip(),
             "습도": str(item.get("습도", "") or "").strip(),
             "체감온도": str(item.get("체감온도", "") or "").strip(),
+            "_기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
+            "_습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
         }
         records.append(record)
     return records
@@ -2446,21 +2837,50 @@ def format_heat_time_display(t: str) -> str:
     return s
 
 
-HEAT_MEASURER_SUFFIXES = ["대원", "반장", "소장", "관리자", "주임", "팀장", "과장", "부장", "님"]
+HEAT_ALLOWED_MEASURERS = [
+    "김판식", "장경배", "박대우", "김종기", "송성태", "손만준",
+    "조운제", "이용영", "방선혁", "공병대", "김명수",
+]
+HEAT_MEASURER_SUFFIXES = ["대원", "반장", "조장", "소장", "관리자", "주임", "팀장", "과장", "부장", "님"]
+
+
+def match_allowed_measurer(name: str) -> str:
+    """OCR 이름을 지정된 11명 중 한 명으로만 보수적으로 매칭. 불확실하면 빈 문자열."""
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+
+    compact = re.sub(r"[^가-힣]", "", raw)
+    for suffix in HEAT_MEASURER_SUFFIXES:
+        suffix_compact = re.sub(r"[^가-힣]", "", suffix)
+        if compact.endswith(suffix_compact):
+            compact = compact[:-len(suffix_compact)]
+            break
+
+    for allowed in HEAT_ALLOWED_MEASURERS:
+        if allowed in compact or compact in allowed and len(compact) >= 2:
+            return allowed
+
+    best_name, best_score, second_score = "", 0.0, 0.0
+    for allowed in HEAT_ALLOWED_MEASURERS:
+        score = SequenceMatcher(None, compact, allowed).ratio()
+        if score > best_score:
+            second_score = best_score
+            best_score = score
+            best_name = allowed
+        elif score > second_score:
+            second_score = score
+
+    # 다른 이름을 억지로 특정 대원으로 바꾸지 않도록 높은 기준과 점수 차이를 함께 요구한다.
+    if best_score >= 0.74 and best_score - second_score >= 0.08:
+        return best_name
+    return ""
 
 
 def format_measurer(name: str) -> str:
-    """측정자 표기를 '이름 대원' 형식으로 정리. 예: '이용영대원' -> '이용영 대원'."""
-    s = str(name or "").strip()
-    if not s:
-        return s
-    for suf in HEAT_MEASURER_SUFFIXES:
-        if s.endswith(suf):
-            s = s[: -len(suf)].strip()
-            break
-    m = re.match(r"^[가-힣]{2,4}", s)
-    core = m.group(0) if m else s
-    return f"{core} 대원" if core else str(name or "").strip()
+    """측정자 표기는 지정된 11명만 허용하며 항상 '이름 대원'으로 통일."""
+    matched = match_allowed_measurer(name)
+    return f"{matched} 대원" if matched else ""
 
 
 def is_implausible_value(temp, humidity) -> bool:
@@ -2648,6 +3068,10 @@ def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
     now_time = datetime.now().strftime("%H:%M")
 
     for rec in records:
+        raw_person = str(rec.get("측정자", "") or "").strip()
+        formatted_person = format_measurer(raw_person)
+        rec["측정자"] = formatted_person
+        rec["_measurer_unrecognized"] = bool(raw_person and not formatted_person)
         if not rec.get("측정위치"):
             rec["측정위치"] = "미지정"
         if not rec.get("측정일자"):
@@ -3014,6 +3438,9 @@ def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str, bool
             raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
         notes = []
+        row["측정자"] = format_measurer(row.get("측정자", ""))
+        if row.get("_measurer_unrecognized"):
+            notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
 
         # 판독 공백 자동 보완: 같은 장소·날짜 평균을 우선 사용하고,
         # 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용한다.
@@ -3059,6 +3486,13 @@ def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict) -> Tuple[
     if sheet_name not in wb.sheetnames:
         raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
     ws = wb[sheet_name]
+
+    # 측정자는 지정된 11명만 저장하며 직책과 관계없이 이름 대원 형식으로 통일한다.
+    raw_person = str(fields.get("측정자", "") or "").strip()
+    normalized_person = format_measurer(raw_person)
+    if raw_person and not normalized_person:
+        raise ValueError("측정자는 지정된 11명 중 한 명만 입력할 수 있습니다.")
+    fields["측정자"] = normalized_person
 
     # 사용자가 수정 입력에서 빈 값을 남긴 경우에도 같은 장소·날짜 평균으로 보완한다.
     fields.pop("_average_filled", None)
@@ -3120,9 +3554,10 @@ def render_heat_index_log():
         st.session_state["heat_saved"] = {}
 
     st.caption(
-        "기온·습도·체감온도 판독값이 비면 같은 장소·같은 날짜의 정상 측정값 평균으로 자동 기입합니다. "
-        "같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용합니다. "
-        "같은 사진은 파일명이 바뀌어도 실제 파일 내용 기준으로 중복 처리하지 않습니다."
+        "실제 온습도계 LCD가 작거나 흐리면 LCD 후보 영역을 자동 탐색해 크게 확대하고 원본·강화본과 교차 판독합니다. "
+        "그래도 기온·습도·체감온도가 비면 같은 장소·같은 날짜의 정상 측정값 평균으로 자동 기입합니다. "
+        "같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용하며, "
+        "같은 사진은 파일명이 바뀌어도 실제 파일 내용 기준으로 중복 처리하지 않습니다. 측정자는 지정된 11명만 이름 대원 형식으로 저장합니다."
     )
 
     heat_files = st.file_uploader(
