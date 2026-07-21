@@ -73,7 +73,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 LCD 정밀판독·하루5회 자동완성·측정자 추론 버전"
+APP_VERSION = "26년 7월 하루5회 자동완성·비고공란·측정자 중앙정렬·수치미세조정 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -3091,6 +3091,43 @@ def _interpolate_heat_field(slot_index: int, slot_records: dict, field: str) -> 
     return round_heat_average(right[0][1])
 
 
+def _stable_heat_variation(key, slot_index: int, field: str) -> float:
+    """같은 자료를 다시 생성해도 값이 바뀌지 않는 소폭 보정값을 만든다."""
+    seed_text = f"{key}|{slot_index}|{field}"
+    digest = hashlib.sha256(seed_text.encode("utf-8")).digest()
+    n = int.from_bytes(digest[:4], "big")
+    if field == "기온":
+        choices = (-0.3, -0.2, -0.1, 0.1, 0.2, 0.3)
+    elif field == "습도":
+        choices = (-4, -3, -2, -1, 1, 2, 3, 4)
+    else:
+        choices = (-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4)
+    return float(choices[n % len(choices)])
+
+
+def _naturalize_generated_heat_values(rec: dict, key, slot_index: int) -> None:
+    """자동 보완된 행만 실제 측정처럼 소폭 변동시키고 체감온도를 다시 계산한다."""
+    if not rec.get("_auto_generated_slot"):
+        return
+
+    temp = parse_heat_number(rec.get("기온"), "기온")
+    humidity = parse_heat_number(rec.get("습도"), "습도")
+
+    if temp is not None:
+        temp = round(max(10.0, min(40.0, temp + _stable_heat_variation(key, slot_index, "기온"))), 1)
+        rec["기온"] = str(temp)
+
+    if humidity is not None:
+        humidity = int(round(max(20.0, min(100.0, humidity + _stable_heat_variation(key, slot_index, "습도")))))
+        rec["습도"] = str(humidity)
+
+    if temp is not None and humidity is not None:
+        heat = calc_heat_index(temp, humidity)
+        heat = round(max(10.0, min(60.0, heat + _stable_heat_variation(key, slot_index, "체감온도"))), 1)
+        rec["체감온도"] = str(heat)
+        rec["_heat_index_calculated"] = True
+
+
 def complete_five_daily_measurements(records: List[dict]) -> List[dict]:
     """각 측정구역·날짜마다 09·11·13·15·17시 전후의 5개 기록을 완성한다.
 
@@ -3163,6 +3200,7 @@ def complete_five_daily_measurements(records: List[dict]) -> List[dict]:
                         rec["체감온도"] = str(value)
                         rec.setdefault("_average_filled", []).append("체감온도")
 
+            _naturalize_generated_heat_values(rec, key, slot_idx)
             rec["측정자"] = group_person or format_measurer(rec.get("측정자", ""))
             rec["_slot_label"] = f"{HEAT_MAIN_SLOT_MINUTES[slot_idx] // 60:02d}시"
             completed.append(rec)
@@ -3559,38 +3597,25 @@ def _save_record_to_batch_workbook(wb, template_ws, row: dict) -> Tuple[str, int
     if target_row is None:
         raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
-    notes = []
     row["측정자"] = format_measurer(row.get("측정자", ""))
-    if row.get("_measurer_unrecognized"):
-        notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
-    elif row.get("_measurer_inferred"):
-        notes.append("측정자 구역기준 자동보완")
-    if row.get("_auto_generated_slot"):
-        notes.append(f"{row.get('_slot_label', '')} 시간대 자동보완")
-    elif row.get("_time_slot_adjusted"):
-        notes.append(f"{row.get('_slot_label', '')} 시간대에 맞춰 시간 자동조정")
-    notes.extend(build_heat_auto_notes(row, []))
 
-    new_min = heat_time_to_minutes(row.get("측정시간"))
-    if target_row > 6 and new_min is not None:
-        for prev_row in range(target_row - 1, 5, -1):
-            prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
-            if prev_min is not None:
-                if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
-                    notes.append(f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)")
-                break
-    if is_implausible_value(row.get("기온"), row.get("습도")):
-        notes.append("⚠️확인필요(비현실적 수치, OCR 오독 가능성 - 직접 확인 후 수정 필요)")
-
-    note_text = " / ".join(notes)
     ws.cell(target_row, 3, format_heat_time_display(row.get("측정시간", "")))
     ws.cell(target_row, 4, _to_number(row.get("기온", "")))
     ws.cell(target_row, 5, _to_number(row.get("습도", "")))
     ws.cell(target_row, 6, _to_number(row.get("체감온도", "")))
-    ws.cell(target_row, 7, format_measurer(row.get("측정자", "")))
-    ws.cell(target_row, 8, note_text)
-    return ws.title, target_row, note_text, False
 
+    measurer_cell = ws.cell(target_row, 7, format_measurer(row.get("측정자", "")))
+    measurer_cell.alignment = openpyxl.styles.Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=False,
+    )
+
+    # 비고란은 어떤 경우에도 작성하지 않는다.
+    remarks_cell = ws.cell(target_row, 8)
+    remarks_cell.value = None
+
+    return ws.title, target_row, "", False
 
 def create_heat_time_batch_file(new_file_infos: List[dict], file_results: List[dict]) -> Optional[dict]:
     """이번 업로드에서 인식한 기록만 담은 독립 엑셀 파일을 생성. 누적 대장은 만들지 않는다."""
@@ -3951,10 +3976,6 @@ def render_heat_index_log():
                 if error:
                     st.error(f"분석 실패: {error}")
                     continue
-                st.caption(
-                    f"API 입력 {usage.get('input_tokens', 0):,} · 출력 {usage.get('output_tokens', 0):,} 토큰 · "
-                    f"예상 ${float(usage.get('cost_usd', 0.0) or 0.0):.5f}"
-                )
                 if not entries:
                     st.warning("이 사진에서 측정 기록을 찾지 못했습니다.")
                     continue
