@@ -3796,16 +3796,22 @@ def overwrite_heat_batch_row(batch_id: str, sheet_name: str, target_row: int, fi
     fields.pop("_heat_index_calculated", None)
     same_sheet_averages = get_heat_field_averages_from_sheet(ws, exclude_row=target_row)
     _, _, unavailable = fill_missing_heat_values(fields, same_sheet_averages, {})
-    notes = clean_heat_auto_notes(ws.cell(target_row, 8).value)
-    notes.extend(build_heat_auto_notes(fields, unavailable))
-    note_text = " / ".join(notes)
+    note_text = ""
 
     ws.cell(target_row, 3, format_heat_time_display(fields.get("측정시간", "")))
     ws.cell(target_row, 4, _to_number(fields.get("기온", "")))
     ws.cell(target_row, 5, _to_number(fields.get("습도", "")))
     ws.cell(target_row, 6, _to_number(fields.get("체감온도", "")))
-    ws.cell(target_row, 7, normalized_person)
-    ws.cell(target_row, 8, note_text)
+
+    measurer_cell = ws.cell(target_row, 7, normalized_person)
+    measurer_cell.alignment = openpyxl.styles.Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=False,
+    )
+
+    # 수정 저장 시에도 비고란은 항상 공란으로 유지한다.
+    ws.cell(target_row, 8).value = None
     wb.save(batch["snapshot_path"])
     return fields, note_text
 
@@ -3818,7 +3824,6 @@ def render_heat_completed_file_list():
         return
 
     for index, batch in enumerate(batches):
-        usage = batch.get("usage", {}) or {}
         col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
         with col_info:
             st.markdown(f"**{batch.get('created_at', '')} 완료**")
@@ -3829,11 +3834,6 @@ def render_heat_completed_file_list():
             source_text = ", ".join([name for name in batch.get("source_files", []) if name])
             if source_text:
                 st.caption(f"원본: {source_text}")
-            if usage:
-                st.caption(
-                    f"API: 입력 {usage.get('input_tokens', 0):,} · 출력 {usage.get('output_tokens', 0):,} 토큰 · "
-                    f"예상 ${float(usage.get('cost_usd', 0.0) or 0.0):.5f}"
-                )
         with col_download:
             with open(batch["snapshot_path"], "rb") as file:
                 data = file.read()
