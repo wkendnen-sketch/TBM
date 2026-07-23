@@ -73,7 +73,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 하루5회 자동완성·비고공란·측정자 중앙정렬·수치미세조정 버전"
+APP_VERSION = "26년 7월 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -502,9 +502,9 @@ def render_bad_photo_storage():
     upload_files = st.file_uploader(
         "부적합사진 파일 업로드",
         accept_multiple_files=True,
-        type=None,  # 확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 업로드 가능
+        type=None,  # 부적합사진 공유
         key="daily_bad_photo_upload_uploader",
-        help="확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 거의 모든 파일 업로드 가능"
+        help="부적합사진 공유"
     )
 
     if upload_files:
