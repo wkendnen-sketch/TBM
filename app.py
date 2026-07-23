@@ -159,36 +159,102 @@ class MaterialWorkItem:
     number: int = 0
 
 
+# 자재입고와 25대 고위험작업 양쪽에 공통 적용되는 업체 우선순위.
+# 표기가 줄거나 OCR이 일부 틀려도 COMPANY_ALIAS와 GPT Vision 보조 판독으로
+# 아래 대표 업체명에 정규화한 뒤 이 순서대로 배치한다.
 COMPANY_ORDER = [
     "원영건업",
     "청암기업",
-    "유셀네트웍스",
+    "유셀네트워크",
     "엠케이지",
+    "금성",
+    "웰시스템",
     "KEC",
-    "우신에이스",
+    "청오",
+    "우신",
+    "엠에스건설",
     "진솔",
     "장한건설",
+    "신영기초개발",
+    "KCC",
+    "씨즌텍",
 ]
 
 COMPANY_ALIAS = {
-    "원영건업": ["원영건업", "원영"],
-    "청암기업": ["청암기업", "청암"],
-    "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀"],
-    "엠케이지": ["엠케이지", "MKG", "mkg"],
-    "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이"],
-    "우신에이스": ["우신에이스", "우신"],
-    "진솔": ["진솔"],
-    "장한건설": ["장한건설", "장한"],
+    "원영건업": [
+        "원영건업", "원영 건업", "원영", "원영건", "원명건업", "원영건엽",
+    ],
+    "청암기업": [
+        "청암기업", "청암 기업", "청암", "청암기엽", "청암업", "청암기엄",
+    ],
+    "유셀네트워크": [
+        "유셀네트워크", "유셀 네트워크", "유셀네트웍스", "유셀 네트웍스",
+        "유셀네트윅스", "유셀네트웍", "유셀네트", "유셀",
+    ],
+    "엠케이지": [
+        "엠케이지", "엠케이쥐", "엠 케 이 지", "MKG", "M.K.G", "MK G",
+    ],
+    "금성": [
+        "금성", "금성건업", "금성 건업", "금성건설", "금성 건설",
+    ],
+    "웰시스템": [
+        "웰시스템", "웰 시스템", "웰씨스템", "월시스템", "웰시스탬",
+    ],
+    "KEC": [
+        "KEC", "K.E.C", "K E C", "케이이씨", "케이 이 씨", "케이이시",
+    ],
+    "청오": [
+        "청오", "청오방수", "청오 방수", "청오건설", "청오 건설",
+    ],
+    "우신": [
+        "우신", "우신에이스", "우신 에이스", "우신에이", "우신이스",
+    ],
+    "엠에스건설": [
+        "엠에스건설", "엠에스 건설", "엠에스", "MS건설", "MS 건설", "M/S", "MS",
+    ],
+    "진솔": [
+        "진솔", "진솔건설", "진솔 건설", "진술", "진슬",
+    ],
+    "장한건설": [
+        "장한건설", "장한 건설", "장한건축", "장한 건축", "장한", "장한전설", "장한건썰",
+    ],
+    "신영기초개발": [
+        "신영기초개발", "신영 기초개발", "신영기초", "신영 기초", "신영개발", "신영",
+    ],
+    "KCC": [
+        "KCC", "K.C.C", "K C C", "케이씨씨", "케이 씨 씨",
+    ],
+    "씨즌텍": [
+        "씨즌텍", "시즌텍", "씨즌테크", "시즌테크", "씨존텍", "씨즌 택",
+    ],
 }
 
-HIGH_RISK_KEYWORDS = [
-    "25대 고위험",
-    "25대고위험",
-    "25 대 고위험",
-    "25대",
-    "고위험",
-    "고 위험",
+# 25대 고위험작업은 상단 제목과 '선정 사유'를 최우선으로 판정한다.
+# 단순히 문서 안에 '위험' 한 단어가 있다는 이유만으로 고위험작업으로 보내지 않는다.
+HIGH_RISK_STRONG_KEYWORDS = [
+    "25대 고위험 작업 검토",
+    "25대고위험작업검토",
+    "25대 고위험작업",
+    "25대고위험작업",
+    "선정 사유",
+    "선정사유",
 ]
+
+HIGH_RISK_SUPPORT_KEYWORDS = [
+    "HOLD POINT",
+    "위험요인 및 대책",
+    "위험요인",
+    "단위작업",
+    "자체기준",
+]
+
+MATERIAL_SIGNAL_KEYWORDS = [
+    "자재입고", "자재 입고", "자재반입", "자재 반입", "반입예정", "반입 예정",
+    "차량동선", "차량 동선", "트럭동선", "트럭 동선", "덤프", "유도원 위치",
+    "유도원", "반입", "게이트", "GATE",
+]
+
+MATERIAL_VISION_MODEL = "gpt-4o-mini"
 
 
 def install_playwright_browser():
@@ -1057,73 +1123,106 @@ def fuzzy_contains(text: str, candidates: List[str], threshold: float = 0.72) ->
     return False
 
 
+def high_risk_evidence_score(text: str) -> int:
+    """25대 고위험 양식의 확실한 표식에 가중치를 주어 판정 점수를 계산."""
+    compact = normalize_for_match(text)
+    if not compact:
+        return 0
+
+    score = 0
+    if fuzzy_contains(compact, HIGH_RISK_STRONG_KEYWORDS[:4], threshold=0.72):
+        score += 7
+    if fuzzy_contains(compact, ["선정사유", "선정 사유", "선정사유:", "선정사유："], threshold=0.70):
+        score += 6
+    if fuzzy_contains(compact, ["25대고위험", "25대 고위험", "고위험작업검토"], threshold=0.70):
+        score += 4
+
+    support_hits = 0
+    for keyword in HIGH_RISK_SUPPORT_KEYWORDS:
+        keyword_norm = normalize_for_match(keyword)
+        if keyword_norm and keyword_norm in compact:
+            support_hits += 1
+    score += min(4, support_hits)
+
+    # 숫자 25와 고위험 계열 문구가 따로 인식된 경우 보조 점수.
+    has_25 = bool(re.search(r"(?:^|\D)2\s*5(?:\D|$)|이십오", str(text or "")))
+    has_risk = fuzzy_contains(compact, ["고위험", "고위헙", "고위혐", "고위힘"], threshold=0.68)
+    if has_25 and has_risk:
+        score += 3
+    return score
+
+
+def material_evidence_score(text: str, company: str = "기타업체") -> int:
+    compact = normalize_for_match(text)
+    if not compact:
+        return 0
+
+    score = 0
+    for keyword in MATERIAL_SIGNAL_KEYWORDS:
+        if normalize_for_match(keyword) in compact:
+            score += 1
+    score = min(score, 5)
+
+    # 좌측 상단의 날짜 + 괄호 업체명 형태는 자재입고 사진의 강한 보조 신호다.
+    if re.search(r"(?:20)?\d{2}[./-]\d{1,2}[./-]\d{1,2}", str(text or "")):
+        score += 2
+    if company != "기타업체":
+        score += 2
+    return score
+
+
 def detect_high_risk(text: str) -> bool:
+    """'25대 고위험 작업 검토' 또는 '선정 사유'가 확인될 때 고위험으로 판정."""
+    return high_risk_evidence_score(text) >= 5
+
+
+def _normalized_tokens(text: str) -> List[str]:
+    tokens = re.findall(r"[가-힣A-Za-z0-9./]+", str(text or ""))
+    return [normalize_for_match(token) for token in tokens if normalize_for_match(token)]
+
+
+def _alias_exact_match(compact: str, tokens: List[str], alias: str) -> bool:
+    alias_norm = normalize_for_match(alias)
+    if not alias_norm:
+        return False
+
+    # MS처럼 짧은 영문 약칭은 긴 OCR 문장 속 부분 문자열로 찾으면 오탐이 많다.
+    # 짧은 별칭은 독립 토큰으로 읽혔을 때만 인정한다.
+    if len(alias_norm) <= 2:
+        return alias_norm in tokens
+    return alias_norm in compact
+
+
+def detect_company_with_score(text: str) -> Tuple[str, float]:
+    """업체명을 대표명으로 정규화하고 매칭 신뢰도를 함께 반환."""
     compact = normalize_for_match(text)
-    loose = str(text or "")
+    tokens = _normalized_tokens(text)
 
-    if "고위험" in compact or "고 위험" in loose:
-        return True
-    if "25대" in compact or "25 대" in loose:
-        return True
-
-    # OCR에서 숫자/한글이 일부 깨지는 경우 보정
-    high_risk_candidates = HIGH_RISK_KEYWORDS + [
-        "이십오대고위험",
-        "25고위험",
-        "25대위험",
-        "고위헙",
-        "고위힘",
-        "고위혐",
-        "고위험작업",
-        "고위험 작업",
-    ]
-
-    if fuzzy_contains(compact, high_risk_candidates, threshold=0.70):
-        return True
-
-    # 25와 위험류 단어가 따로 읽힌 경우
-    has_25 = bool(re.search(r"2\s*5|25|이십오", compact))
-    has_risk = fuzzy_contains(compact, ["고위험", "위험", "위헙", "위혐"], threshold=0.68)
-    return has_25 and has_risk
-
-
-def detect_company(text: str) -> str:
-    compact = normalize_for_match(text)
-
-    # 자주 틀리는 OCR 후보 추가
-    extra_alias = {
-        "원영건업": ["원영건업", "원영", "원영건", "원명건업"],
-        "청암기업": ["청암기업", "청암", "청암기엽", "청암업"],
-        "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀", "유셀네트워크", "유셀네트웍"],
-        "엠케이지": ["엠케이지", "MKG", "mkg", "엠케이", "엠케", "MK G"],
-        "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이", "K E C"],
-        "우신에이스": ["우신에이스", "우신", "우신에이", "우신이스"],
-        "진솔": ["진솔", "진술", "진슬", "진솔건", "진솔건설"],
-        "장한건설": ["장한건설", "장한", "장한전설", "장한건", "장한건썰"],
-    }
-
+    # 긴 별칭부터 정확 매칭해 '우신'보다 '우신에이스' 같은 표기를 우선 처리한다.
+    exact_candidates = []
     for company in COMPANY_ORDER:
-        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
-        for alias in aliases:
-            if normalize_for_match(alias) in compact:
-                return company
+        for alias in COMPANY_ALIAS.get(company, [company]):
+            exact_candidates.append((len(normalize_for_match(alias)), company, alias))
 
-    # OCR 오인식 보정: 토큰 및 슬라이딩 유사도 기반 판단
-    tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or ""))
-    compact_tokens = [normalize_for_match(t) for t in tokens]
-    compact_tokens.append(compact)
+    for _, company, alias in sorted(exact_candidates, reverse=True):
+        if _alias_exact_match(compact, tokens, alias):
+            return company, 1.0
 
+    # OCR 일부 글자 오인식 보정. 2글자 약칭은 유사도 추정에서 제외한다.
     best_company = "기타업체"
     best_score = 0.0
+    comparison_tokens = list(tokens)
+    if compact:
+        comparison_tokens.append(compact)
 
     for company in COMPANY_ORDER:
-        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
-        for alias in aliases:
+        for alias in COMPANY_ALIAS.get(company, [company]):
             alias_norm = normalize_for_match(alias)
-            if not alias_norm:
+            if len(alias_norm) < 3:
                 continue
-            for token in compact_tokens:
-                if len(token) < 2:
+
+            for token in comparison_tokens:
+                if len(token) < 3:
                     continue
 
                 # 토큰 전체 비교
@@ -1132,9 +1231,9 @@ def detect_company(text: str) -> str:
                     best_score = score
                     best_company = company
 
-                # 긴 토큰 안에 업체명이 섞여 있는 경우 부분 비교
+                # 긴 토큰 안에 업체명이 붙어서 읽힌 경우 부분 비교
                 n = len(alias_norm)
-                if len(token) >= n >= 2:
+                if len(token) >= n:
                     for i in range(0, len(token) - n + 1):
                         part = token[i:i + n]
                         score = SequenceMatcher(None, alias_norm, part).ratio()
@@ -1142,48 +1241,377 @@ def detect_company(text: str) -> str:
                             best_score = score
                             best_company = company
 
-    if best_score >= 0.68:
-        return best_company
+    if best_score >= 0.80:
+        return best_company, best_score
+    return "기타업체", best_score
 
-    return "기타업체"
+
+def detect_company(text: str) -> str:
+    return detect_company_with_score(text)[0]
 
 
 def extract_sort_number(text: str) -> int:
+    """제목의 업체명 뒤에 붙은 슬라이드 순번을 다양한 형식으로 추출한다.
+
+    지원 예시:
+    - (원영건업)-1, (원영건업) - 2, (원영건업)_3
+    - (원영건업) 1., (원영건업) 2), (원영건업) (3)
+    - (원영건업) 1번, (원영건업) 제2, (원영건업) No.3, (원영건업) #4
+    - 원영건업-1, 원영건업 2. 처럼 괄호가 없는 제목/파일명
+
+    날짜(26.07.23), 층수, 우측 25대 작업목록 번호를 순번으로 잘못 잡지 않도록
+    업체명 또는 고위험 제목과 같은 줄에 있는 끝번호만 우선 인정한다.
+    """
     raw = str(text or "")
+    if not raw.strip():
+        return 0
 
-    # 엠케이지 1. 지게차 / 진솔-2 / KEC 지하 2층 등 대부분 대응
-    patterns = [
-        r"(?:지하|B)\s*[-]?\s*(\d+)\s*층",
-        r"[-–_]\s*(\d+)",
-        r"\b(\d+)\s*[.)]",
-        r"(?:^|\s)(\d+)(?:\s|$)",
-    ]
+    # OCR에서 여러 전처리 결과가 이어붙는 경우를 고려해 줄 단위로 우선 검사한다.
+    lines = [line.strip() for line in re.split(r"[\n\r]+", raw) if line.strip()]
 
-    for pattern in patterns:
-        m = re.search(pattern, raw, flags=re.IGNORECASE)
-        if m:
+    # 날짜는 순번 후보에서 제외한다.
+    def strip_dates(value: str) -> str:
+        value = re.sub(r"(?:20)?\d{2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}", " ", value)
+        value = re.sub(r"\b\d{1,2}\s*월\s*\d{1,2}\s*일\b", " ", value)
+        return value
+
+    # 업체명 뒤 순번의 허용 표기. 숫자는 제목 끝에 있어야 한다.
+    suffix = (
+        r"\s*(?:[-–—_:/]\s*|#\s*|"
+        r"(?:NO\.?|N0\.?|PAGE|P\.?|슬라이드|순번|제)\s*[:：#-]?\s*)?"
+        r"(?:\(\s*)?(\d{1,2})(?:\s*\))?"
+        r"(?:\s*(?:번|차|PAGE|P))?\s*[.)]?\s*$"
+    )
+
+    # 1) 괄호 업체명 바로 뒤의 번호를 가장 강하게 인정한다.
+    parenthesized_company = re.compile(r"\([^\n\r)]{1,50}\)" + suffix, re.IGNORECASE)
+    for line in lines:
+        cleaned = strip_dates(line)
+        match = parenthesized_company.search(cleaned)
+        if match:
             try:
-                return int(m.group(1))
+                number = int(match.group(1))
+                if 1 <= number <= 99:
+                    return number
+            except Exception:
+                pass
+
+    # 2) 등록된 업체 별칭이 포함된 제목/파일명 끝번호를 인정한다.
+    aliases = []
+    for company in COMPANY_ORDER:
+        aliases.extend(COMPANY_ALIAS.get(company, [company]))
+    aliases = sorted({alias for alias in aliases if alias}, key=len, reverse=True)
+
+    for line in lines:
+        cleaned = strip_dates(line)
+        compact = normalize_for_match(cleaned)
+        for alias in aliases:
+            alias_norm = normalize_for_match(alias)
+            if not alias_norm or alias_norm not in compact:
+                continue
+            # 원문에서 별칭 뒤에 오는 끝번호를 찾는다. 영문은 대소문자 무시.
+            pattern = re.compile(re.escape(alias) + suffix, re.IGNORECASE)
+            match = pattern.search(cleaned)
+            if match:
+                try:
+                    number = int(match.group(1))
+                    if 1 <= number <= 99:
+                        return number
+                except Exception:
+                    pass
+
+    # 3) '25대 고위험 작업 검토'가 있는 제목 줄의 끝번호를 보조 인정한다.
+    high_risk_title = re.compile(
+        r"(?:25\s*대\s*)?고위험\s*작업\s*검토[^\n\r]{0,100}?" + suffix,
+        re.IGNORECASE,
+    )
+    for line in lines:
+        cleaned = strip_dates(line)
+        match = high_risk_title.search(cleaned)
+        if match:
+            try:
+                number = int(match.group(1))
+                if 1 <= number <= 99:
+                    return number
+            except Exception:
+                pass
+
+    # 4) 명시적인 순번 표기만 마지막 보조 수단으로 인정한다.
+    explicit_patterns = [
+        r"(?:페이지|PAGE|슬라이드|NO\.?|N0\.?|순번)\s*[:：#-]?\s*(\d{1,2})\s*(?:번|차|PAGE|P)?\b",
+        r"#\s*(\d{1,2})\b",
+    ]
+    cleaned_raw = strip_dates(raw)
+    for pattern in explicit_patterns:
+        match = re.search(pattern, cleaned_raw, flags=re.IGNORECASE)
+        if match:
+            try:
+                number = int(match.group(1))
+                if 1 <= number <= 99:
+                    return number
             except Exception:
                 pass
 
     return 0
 
 
+def _material_image_data_url(img: Image.Image, max_dim: int = 1500, quality: int = 88) -> str:
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    width, height = img.size
+    longest = max(width, height)
+    if longest > max_dim:
+        ratio = max_dim / longest
+        img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.LANCZOS)
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=quality, optimize=True)
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def make_material_vision_images(image_path: str) -> List[str]:
+    """전체 문맥과 상단 제목 영역을 한 번의 Vision 호출에 함께 전달."""
+    img = Image.open(image_path)
+    try:
+        img.seek(0)
+    except Exception:
+        pass
+    img = ImageOps.exif_transpose(img)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    full = ImageOps.autocontrast(img, cutoff=1)
+    full = ImageEnhance.Sharpness(full).enhance(1.7)
+
+    top_height = max(1, int(img.height * 0.34))
+    top = img.crop((0, 0, img.width, top_height))
+    top = ImageOps.autocontrast(top, cutoff=1)
+    top = ImageEnhance.Contrast(top).enhance(1.45)
+    top = ImageEnhance.Sharpness(top).enhance(2.7)
+
+    return [
+        _material_image_data_url(full, max_dim=1450, quality=87),
+        _material_image_data_url(top, max_dim=1750, quality=91),
+    ]
+
+
+def _extract_response_output_text(data: dict) -> str:
+    if data.get("output_text"):
+        return str(data.get("output_text") or "")
+    result = ""
+    for item in data.get("output", []):
+        for content in item.get("content", []):
+            if content.get("type") == "output_text":
+                result += str(content.get("text", "") or "")
+    return result
+
+
+def _parse_single_json_object(text: str) -> dict:
+    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        match = re.search(r"\{.*\}", cleaned, flags=re.S)
+        parsed = json.loads(match.group(0)) if match else {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def analyze_material_work_with_gpt(
+    api_key: str,
+    image_path: str,
+    original_name: str,
+    local_ocr_text: str,
+) -> dict:
+    """사진당 GPT-4o-mini Vision 1회만 사용해 분류·업체를 교차검증한다."""
+    if not api_key:
+        return {}
+
+    company_list = ", ".join(COMPANY_ORDER)
+    prompt = f"""이 이미지는 건설현장 일일안전회의 PPT에 들어갈 원본 사진이다.
+첫 번째 이미지는 전체 화면이고 두 번째 이미지는 같은 사진의 상단 제목 확대본이다.
+두 이미지를 별개의 사진으로 세지 말고 동일 사진을 함께 대조해서 아래를 판정하라.
+
+분류 규칙:
+1. 상단에 '25대 고위험 작업 검토', '25대 고위험작업', '선정 사유'가 있거나,
+   우측에 25대 고위험 단위작업 목록과 선정 항목이 명확하면 work_type은 high_risk이다.
+2. 위 고위험 고유 표식이 없고, 상단에 날짜와 업체명이 있으며 자재 반입·차량·트럭·유도원·동선·반입예정 내용이면 material이다.
+3. '위험', '안전', 'Hold Point' 같은 일반 문구 하나만으로 high_risk로 판정하지 마라.
+4. 애매하면 상단 제목과 '선정 사유' 유무를 최우선으로 확인한다.
+
+업체명 규칙:
+- 반드시 다음 대표명 중 하나로 정규화하거나, 판단 불가하면 '기타업체'로 적는다:
+  {company_list}
+- 유셀네트웍스/유셀네트워크/유셀은 유셀네트워크,
+  MKG/엠케이지는 엠케이지,
+  KEC/케이이씨는 KEC,
+  청오방수/청오는 청오,
+  우신에이스/우신은 우신,
+  MS/MS건설/엠에스건설은 엠에스건설,
+  장한건축/장한건설은 장한건설,
+  신영/신영기초개발은 신영기초개발,
+  시즌텍/씨즌텍은 씨즌텍으로 적는다.
+- 상단 괄호 안 업체명을 가장 우선해서 읽고 OCR 일부 오타는 문맥상 보정한다.
+
+제목의 업체명 뒤에 붙은 슬라이드 순번을 number에 적는다. 표기 방식은 다양할 수 있다.
+예: '(업체명)-1', '(업체명) - 2', '(업체명)_3', '(업체명) 1.', '(업체명) 2)',
+'(업체명) (3)', '(업체명) 1번', '(업체명) 제2', '(업체명) No.3', '(업체명) #4',
+또는 괄호 없이 '업체명-1', '업체명 2.'처럼 적힐 수 있다.
+날짜의 일자 숫자, 층수, 우측 25대 단위작업 목록 번호는 슬라이드 순번으로 읽지 마라.
+업체명 또는 상단 제목과 같은 줄의 끝에 붙은 번호만 순번으로 인정하고, 없으면 0이다.
+파일명: {original_name}
+로컬 OCR 참고문자(틀릴 수 있음): {local_ocr_text[:3500]}
+
+아래 JSON 객체만 출력하라. 설명과 코드블록은 금지한다.
+{{"work_type":"material 또는 high_risk", "company":"대표 업체명 또는 기타업체", "number":0, "confidence":0.0, "evidence":"판정에 사용한 짧은 문구"}}"""
+
+    content = [{"type": "input_text", "text": prompt}]
+    for image_url in make_material_vision_images(image_path):
+        content.append({"type": "input_image", "image_url": image_url})
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": MATERIAL_VISION_MODEL,
+            "input": [{"role": "user", "content": content}],
+        },
+        timeout=80,
+    )
+    if response.status_code != 200:
+        return {}
+
+    parsed = _parse_single_json_object(_extract_response_output_text(response.json()))
+    work_type = str(parsed.get("work_type", "") or "").strip().lower()
+    if work_type not in ("material", "high_risk"):
+        work_type = ""
+
+    company_raw = str(parsed.get("company", "") or "").strip()
+    company = detect_company(company_raw)
+    if company == "기타업체" and company_raw in COMPANY_ORDER:
+        company = company_raw
+
+    try:
+        number = int(parsed.get("number", 0) or 0)
+    except Exception:
+        number = 0
+    try:
+        confidence = float(parsed.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+
+    return {
+        "work_type": work_type,
+        "company": company,
+        "number": max(0, number),
+        "confidence": max(0.0, min(1.0, confidence)),
+        "evidence": str(parsed.get("evidence", "") or "").strip(),
+    }
+
+
+def needs_material_vision_review(
+    combined_text: str,
+    local_work_type: str,
+    local_company: str,
+    local_company_score: float,
+    local_high_score: int,
+) -> bool:
+    """명확한 사진은 로컬 OCR만 사용하고 애매한 사진만 Vision 1회 보조.
+
+    전체 사진을 무조건 API에 보내지 않아 평균 API 사용량을 억제하면서,
+    상단 제목·선정사유·업체명이 불명확한 사진은 정밀 판독한다.
+    """
+    compact = normalize_for_match(combined_text)
+    if not compact:
+        return True
+    if local_company == "기타업체" or local_company_score < 0.78:
+        return True
+
+    if local_work_type == "high_risk":
+        # 제목이나 선정사유가 확실하게 뒷받침되면 로컬 결과를 그대로 사용한다.
+        return local_high_score < 7
+
+    # 자재입고는 '고위험 문구가 없음'만으로 확정하지 않고,
+    # 반입 관련 고유 문구가 실제로 읽혔을 때만 API를 생략한다.
+    clear_material_markers = [
+        "자재입고", "자재반입", "반입예정", "반입계획", "트럭1동선", "트럭2동선",
+        "반입차량", "납품차량", "자재하역",
+    ]
+    has_clear_material_marker = any(
+        normalize_for_match(marker) in compact for marker in clear_material_markers
+    )
+    has_high_risk_support = any(
+        normalize_for_match(marker) in compact
+        for marker in ("선정사유", "HOLD POINT", "위험요인 및 대책", "단위작업", "자체기준")
+    )
+    if has_clear_material_marker and not has_high_risk_support:
+        return False
+    if len(compact) < 45:
+        return True
+    return True
+
+
 def classify_material_work_image(
     image_path: str,
     original_name: str,
     upload_index: int,
-    ocr_image_path: str = None
+    ocr_image_path: str = None,
+    api_key: str = "",
 ) -> MaterialWorkItem:
-    # OCR은 원본 이미지로, PPT 삽입은 변환/축소된 JPG로 분리
+    # 1차: 원본 이미지 로컬 OCR. 2차: 사진당 Vision API 1회 교차검증.
+    # API 실패 시에도 기존 OCR 결과로 정상 동작한다.
     ocr_source = ocr_image_path or image_path
     ocr_text = extract_ocr_text(ocr_source, top_ratio=0.60)
     combined_text = f"{ocr_text} {original_name}"
 
-    work_type = "high_risk" if detect_high_risk(combined_text) else "material"
-    company = detect_company(combined_text)
-    number = extract_sort_number(combined_text)
+    local_company, local_company_score = detect_company_with_score(combined_text)
+    local_high_score = high_risk_evidence_score(combined_text)
+    local_material_score = material_evidence_score(combined_text, local_company)
+    local_work_type = "high_risk" if local_high_score >= 5 else "material"
+    local_number = extract_sort_number(combined_text)
+
+    vision = {}
+    use_vision = needs_material_vision_review(
+        combined_text=combined_text,
+        local_work_type=local_work_type,
+        local_company=local_company,
+        local_company_score=local_company_score,
+        local_high_score=local_high_score,
+    )
+    if use_vision:
+        try:
+            vision = analyze_material_work_with_gpt(
+                api_key=api_key,
+                image_path=ocr_source,
+                original_name=original_name,
+                local_ocr_text=ocr_text,
+            )
+        except Exception:
+            vision = {}
+
+    work_type = local_work_type
+    company = local_company
+    number = local_number
+
+    # Vision 신뢰도가 충분하면 상단 확대 판독 결과를 우선 사용한다.
+    vision_confidence = float(vision.get("confidence", 0.0) or 0.0)
+    if vision.get("work_type") in ("material", "high_risk") and vision_confidence >= 0.62:
+        work_type = vision["work_type"]
+    elif local_high_score >= 5:
+        work_type = "high_risk"
+    elif local_material_score >= 3:
+        work_type = "material"
+
+    vision_company = vision.get("company", "기타업체")
+    if vision_company in COMPANY_ORDER and vision_confidence >= 0.58:
+        company = vision_company
+    elif local_company_score < 0.70:
+        company = local_company
+
+    if int(vision.get("number", 0) or 0) > 0 and vision_confidence >= 0.58:
+        number = int(vision["number"])
 
     return MaterialWorkItem(
         image_path=image_path,
@@ -1194,7 +1622,6 @@ def classify_material_work_image(
         company=company,
         number=number,
     )
-
 
 def company_order_index(company: str) -> int:
     try:
@@ -1996,7 +2423,7 @@ def render_daily_safety_meeting():
 
     if material_files:
         if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
-            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. OCR 때문에 시간이 오래 걸릴 수 있습니다.")
+            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. 상단 확대 OCR과 Vision 교차검증으로 시간이 조금 더 걸릴 수 있습니다.")
         st.markdown("#### 자재입고 및 고위험작업")
 
         for idx, f in enumerate(material_files):
@@ -2010,12 +2437,36 @@ def render_daily_safety_meeting():
             material_jpg_path = convert_to_jpg(material_original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
             temp_paths.append(material_jpg_path)
 
-            item = classify_material_work_image(
-                material_jpg_path,
-                original_name=f.name,
-                upload_index=idx,
-                ocr_image_path=material_original_path
-            )
+            file_digest = hashlib.sha256(f.getvalue()).hexdigest()
+            st.session_state.setdefault("daily_material_analysis_cache", {})
+            cached = st.session_state["daily_material_analysis_cache"].get(file_digest)
+
+            if cached:
+                item = MaterialWorkItem(
+                    image_path=material_jpg_path,
+                    original_name=f.name,
+                    upload_index=idx,
+                    ocr_text=cached.get("ocr_text", ""),
+                    work_type=cached.get("work_type", "material"),
+                    company=cached.get("company", "기타업체"),
+                    number=int(cached.get("number", 0) or 0),
+                )
+            else:
+                with st.spinner(f"{f.name} 정밀 인식 중..."):
+                    item = classify_material_work_image(
+                        material_jpg_path,
+                        original_name=f.name,
+                        upload_index=idx,
+                        ocr_image_path=material_original_path,
+                        api_key=st.secrets.get("GPT_API_KEY", ""),
+                    )
+                st.session_state["daily_material_analysis_cache"][file_digest] = {
+                    "ocr_text": item.ocr_text,
+                    "work_type": item.work_type,
+                    "company": item.company,
+                    "number": item.number,
+                }
+
             material_items.append(item)
 
             c1, c2 = st.columns([1, 4])
