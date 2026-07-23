@@ -73,7 +73,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 버전"
+APP_VERSION = "26년 7월 인식·속도개선 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -255,18 +255,29 @@ MATERIAL_SIGNAL_KEYWORDS = [
 ]
 
 MATERIAL_VISION_MODEL = "gpt-4o-mini"
+MATERIAL_VISION_BATCH_SIZE = 3
+MATERIAL_VISION_TIMEOUT = 120
 
 
+@st.cache_resource(show_spinner=False)
 def install_playwright_browser():
+    """Chromium 설치 확인은 서버 실행 중 한 번만 수행한다.
+
+    Streamlit은 입력할 때마다 스크립트를 다시 실행하므로, 캐시하지 않으면
+    사진 선택·텍스트 입력 때마다 playwright install 명령이 반복되어 모바일에서
+    화면이 멈춘 것처럼 보일 수 있다.
+    """
     try:
         subprocess.run(
             ["playwright", "install", "chromium"],
             check=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
+            stderr=subprocess.DEVNULL,
+            timeout=180,
         )
     except Exception:
         pass
+    return True
 
 
 def hide_streamlit_ui():
@@ -1390,8 +1401,8 @@ def make_material_vision_images(image_path: str) -> List[str]:
     top = ImageEnhance.Sharpness(top).enhance(2.7)
 
     return [
-        _material_image_data_url(full, max_dim=1450, quality=87),
-        _material_image_data_url(top, max_dim=1750, quality=91),
+        _material_image_data_url(full, max_dim=1250, quality=82),
+        _material_image_data_url(top, max_dim=1550, quality=87),
     ]
 
 
@@ -1622,6 +1633,278 @@ def classify_material_work_image(
         company=company,
         number=number,
     )
+
+
+def ocr_with_tesseract_fast(img: Image.Image) -> str:
+    """자재/고위험 문서의 상단 제목만 빠르게 읽는 Tesseract 보조 OCR.
+
+    기존 ocr_with_tesseract는 언어·PSM 조합을 최대 16회 실행해 정확도는 높지만
+    모바일 Streamlit에서는 사진 한 장당 시간이 지나치게 길어질 수 있다.
+    이 함수는 실패 보조용으로 최대 2회만 실행한다.
+    """
+    if pytesseract is None:
+        return ""
+
+    attempts = [
+        ("kor+eng", "--oem 3 --psm 6"),
+        ("kor+eng", "--oem 3 --psm 11"),
+    ]
+    best = ""
+    for lang, config in attempts:
+        try:
+            candidate = pytesseract.image_to_string(img, lang=lang, config=config)
+        except Exception:
+            try:
+                candidate = pytesseract.image_to_string(img, config=config)
+            except Exception:
+                continue
+        candidate = normalize_ocr_text(candidate)
+        if len(normalize_for_match(candidate)) > len(normalize_for_match(best)):
+            best = candidate
+    return best
+
+
+def extract_material_fast_ocr(image_path: str) -> str:
+    """Vision 실패 사진에만 사용하는 빠른 상단 OCR.
+
+    전체/좌우/중앙 6개 영역 × 전처리 7종을 모두 돌리던 기존 정밀 OCR 대신,
+    업체명·25대 고위험 제목·선정사유가 실제로 위치하는 상단 영역 2종만 읽는다.
+    """
+    try:
+        img = Image.open(image_path)
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+        img = ImageOps.exif_transpose(img)
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        top_h = max(1, int(img.height * 0.46))
+        top = img.crop((0, 0, img.width, top_h))
+        longest = max(top.size)
+        if longest < 1900:
+            ratio = 1900 / max(1, longest)
+            top = top.resize((max(1, int(top.width * ratio)), max(1, int(top.height * ratio))), Image.LANCZOS)
+        elif longest > 3200:
+            ratio = 3200 / longest
+            top = top.resize((max(1, int(top.width * ratio)), max(1, int(top.height * ratio))), Image.LANCZOS)
+
+        color = ImageOps.autocontrast(top, cutoff=1)
+        color = ImageEnhance.Sharpness(color).enhance(2.0)
+        gray = ImageOps.autocontrast(top.convert("L"), cutoff=1)
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+        gray = ImageEnhance.Sharpness(gray).enhance(2.8)
+
+        texts = []
+        seen = set()
+        paddle = get_paddle_ocr()
+        if paddle is not None:
+            append_unique_text(texts, seen, ocr_with_paddle(color))
+            append_unique_text(texts, seen, ocr_with_paddle(gray))
+
+        # Paddle이 없거나 상단 제목이 거의 안 읽힌 경우에만 Tesseract를 짧게 보조한다.
+        combined = normalize_ocr_text("\n".join(texts))
+        if len(normalize_for_match(combined)) < 24:
+            append_unique_text(texts, seen, ocr_with_tesseract_fast(gray))
+
+        return normalize_ocr_text("\n".join(texts))
+    except Exception:
+        return ""
+
+
+def _parse_json_array_objects(text: str) -> List[dict]:
+    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        match = re.search(r"\[.*\]", cleaned, flags=re.S)
+        parsed = json.loads(match.group(0)) if match else []
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
+
+
+def analyze_material_work_batch_with_gpt(api_key: str, entries: List[dict]) -> dict:
+    """최대 3장의 전체본+상단 확대본을 한 번의 Vision 요청으로 판독한다.
+
+    사진마다 API를 직렬 호출하던 구조보다 네트워크 대기 횟수를 크게 줄이면서,
+    각 사진은 전체 문맥과 상단 제목을 모두 확인한다.
+    반환값은 upload_index를 키로 하는 판독 결과 사전이다.
+    """
+    if not api_key or not entries:
+        return {}
+
+    company_list = ", ".join(COMPANY_ORDER)
+    prompt = f"""아래에는 건설현장 일일안전회의용 사진이 여러 세트 있다.
+각 세트는 '사진 N 전체'와 '사진 N 상단 확대'가 같은 원본이다. 세트끼리 섞지 말고 사진 N마다 하나씩 판정하라.
+
+분류 기준:
+- 상단에 '25대 고위험 작업 검토', '25대 고위험작업', '선정 사유'가 있거나 우측 25대 단위작업 표가 명확하면 high_risk.
+- 위 고위험 고유 표식이 없고 날짜+업체명, 차량·트럭·유도원·동선·반입 예정 내용이면 material.
+- 일반적인 '위험', '안전', 'Hold Point' 한 단어만으로 high_risk로 보내지 마라.
+- 고위험 고유 표식이 없으면 기본적으로 material로 판정한다.
+
+업체는 다음 대표명 중 하나로 정규화하고, 끝까지 불명확하면 기타업체로 적는다:
+{company_list}
+유셀네트웍스/유셀은 유셀네트워크, MKG는 엠케이지, 케이이씨는 KEC,
+청오방수는 청오, 우신에이스는 우신, MS/MS건설은 엠에스건설,
+장한건축은 장한건설, 신영은 신영기초개발, 시즌텍은 씨즌텍으로 통합한다.
+상단 괄호 안 업체명을 최우선으로 읽고 일부 글자 오독은 업체 목록 문맥으로 보정한다.
+
+순번 number는 업체명 또는 상단 제목과 같은 줄 끝에 붙은 번호만 인정한다.
+- 허용: (업체)-1, (업체) -2, (업체)_3, (업체) 1., (업체) 2), (업체)(3), 1번, 제2, No.3, #4
+- 날짜 숫자, 층수, 우측 25대 단위작업표 번호는 순번이 아니다.
+- 순번이 없으면 0.
+
+각 사진마다 반드시 아래 JSON 배열로만 답한다. index는 제공된 사진 번호 그대로 적는다.
+[
+  {{"index":1,"work_type":"material 또는 high_risk","company":"대표 업체명 또는 기타업체","number":0,"confidence":0.0,"evidence":"상단에서 확인한 짧은 근거"}}
+]"""
+
+    content = [{"type": "input_text", "text": prompt}]
+    for order, entry in enumerate(entries, start=1):
+        content.append({
+            "type": "input_text",
+            "text": f"사진 {order} 전체 / 파일명: {entry.get('original_name', '')}",
+        })
+        images = make_material_vision_images(entry["ocr_path"])
+        if images:
+            content.append({"type": "input_image", "image_url": images[0]})
+        content.append({"type": "input_text", "text": f"사진 {order} 상단 확대"})
+        if len(images) > 1:
+            content.append({"type": "input_image", "image_url": images[1]})
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
+        json={"model": MATERIAL_VISION_MODEL, "input": [{"role": "user", "content": content}]},
+        timeout=MATERIAL_VISION_TIMEOUT,
+    )
+    if response.status_code != 200:
+        return {}
+
+    parsed_items = _parse_json_array_objects(_extract_response_output_text(response.json()))
+    results = {}
+    for parsed in parsed_items:
+        try:
+            order = int(parsed.get("index", 0) or 0)
+        except Exception:
+            continue
+        if not (1 <= order <= len(entries)):
+            continue
+        entry = entries[order - 1]
+
+        work_type = str(parsed.get("work_type", "") or "").strip().lower()
+        if work_type not in ("material", "high_risk"):
+            work_type = ""
+
+        company_raw = str(parsed.get("company", "") or "").strip()
+        company = detect_company(company_raw)
+        if company_raw in COMPANY_ORDER:
+            company = company_raw
+
+        try:
+            number = max(0, int(parsed.get("number", 0) or 0))
+        except Exception:
+            number = 0
+        try:
+            confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0) or 0.0)))
+        except Exception:
+            confidence = 0.0
+
+        results[entry["upload_index"]] = {
+            "work_type": work_type,
+            "company": company,
+            "number": number,
+            "confidence": confidence,
+            "evidence": str(parsed.get("evidence", "") or "").strip(),
+        }
+    return results
+
+
+def classify_material_work_images_fast(
+    prepared_entries: List[dict],
+    api_key: str = "",
+    progress_callback=None,
+) -> List[MaterialWorkItem]:
+    """업로드 사진을 배치 Vision 우선으로 판독하고 실패분만 빠른 로컬 OCR로 보완."""
+    vision_results = {}
+    total = len(prepared_entries)
+
+    if api_key:
+        chunks = [
+            prepared_entries[i:i + MATERIAL_VISION_BATCH_SIZE]
+            for i in range(0, total, MATERIAL_VISION_BATCH_SIZE)
+        ]
+        for chunk_index, chunk in enumerate(chunks):
+            try:
+                vision_results.update(analyze_material_work_batch_with_gpt(api_key, chunk))
+            except Exception:
+                pass
+            if progress_callback:
+                progress_callback(
+                    min(total, (chunk_index + 1) * MATERIAL_VISION_BATCH_SIZE),
+                    total,
+                    "상단 제목과 업체명 판독 중",
+                )
+
+    items = []
+    for position, entry in enumerate(prepared_entries, start=1):
+        vision = vision_results.get(entry["upload_index"], {})
+        confidence = float(vision.get("confidence", 0.0) or 0.0)
+        work_type = vision.get("work_type", "")
+        company = vision.get("company", "기타업체")
+        number = int(vision.get("number", 0) or 0)
+        ocr_text = ""
+
+        vision_valid = work_type in ("material", "high_risk") and confidence >= 0.50
+        # 업체가 불명확하거나 Vision이 실패했을 때만 로컬 상단 OCR을 실행한다.
+        if not vision_valid or company not in COMPANY_ORDER:
+            ocr_text = extract_material_fast_ocr(entry["ocr_path"])
+            combined_text = f"{ocr_text} {entry['original_name']}"
+            local_company, local_company_score = detect_company_with_score(combined_text)
+            local_high_score = high_risk_evidence_score(combined_text)
+            local_material_score = material_evidence_score(combined_text, local_company)
+            local_work_type = "high_risk" if local_high_score >= 5 else "material"
+            local_number = extract_sort_number(combined_text)
+
+            if not vision_valid:
+                work_type = local_work_type
+            elif work_type == "material" and local_high_score >= 7:
+                # 상단에서 선정사유/25대 문구가 강하게 잡히면 고위험 누락을 방지한다.
+                work_type = "high_risk"
+
+            if company not in COMPANY_ORDER and local_company_score >= 0.68:
+                company = local_company
+            if number <= 0 and local_number > 0:
+                number = local_number
+            if local_material_score >= 3 and local_high_score < 5 and not vision_valid:
+                work_type = "material"
+
+        # 파일명에 명확한 업체/순번이 있으면 마지막 보조 근거로 사용한다.
+        if company not in COMPANY_ORDER:
+            filename_company = detect_company(entry["original_name"])
+            company = filename_company if filename_company in COMPANY_ORDER else "기타업체"
+        if number <= 0:
+            number = extract_sort_number(entry["original_name"])
+        if work_type not in ("material", "high_risk"):
+            work_type = "material"
+
+        items.append(MaterialWorkItem(
+            image_path=entry["image_path"],
+            original_name=entry["original_name"],
+            upload_index=entry["upload_index"],
+            ocr_text=ocr_text or str(vision.get("evidence", "") or ""),
+            work_type=work_type,
+            company=company,
+            number=max(0, int(number or 0)),
+        ))
+
+        if progress_callback and not api_key:
+            progress_callback(position, total, "빠른 상단 OCR 판독 중")
+
+    return items
 
 def company_order_index(company: str) -> int:
     try:
@@ -2378,41 +2661,27 @@ def render_daily_safety_meeting():
         key="daily_bad_uploader"
     )
 
-    bad_items = []
-    material_items = []
-    temp_paths = []
-
+    bad_text_values = []
     if bad_files:
         if len(bad_files) > MAX_DAILY_FILES_SOFT_WARN:
             st.warning(f"부적합사진이 {len(bad_files)}장입니다. 자동 축소 처리하지만 생성 시간이 길어질 수 있습니다.")
-        st.markdown("#### 부적합사진")
-
-        for idx, f in enumerate(bad_files):
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(f.getbuffer())
-                original_path = tmp.name
-                temp_paths.append(original_path)
-
-            jpg_path = convert_to_jpg(original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
-            temp_paths.append(jpg_path)
-
-            with st.expander(f"부적합사진 #{idx + 1}", expanded=True):
+        with st.expander(f"부적합사진 문구 입력 ({len(bad_files)}장)", expanded=False):
+            for idx, uploaded in enumerate(bad_files):
                 c1, c2 = st.columns([1, 4])
-
                 with c1:
-                    st.image(jpg_path, width=130)
-
+                    try:
+                        st.image(uploaded, width=110)
+                    except Exception:
+                        st.caption(uploaded.name)
                 with c2:
-                    text_value = st.text_input(
-                        "문구 입력",
+                    bad_text_values.append(st.text_input(
+                        f"{idx + 1}번 문구",
                         value="",
                         placeholder="예: 자재 반입 확인",
-                        key=f"daily_bad_text_{idx}"
-                    )
-
-            bad_items.append(DailySlideData(jpg_path, text_value, get_image_orientation(jpg_path)))
+                        key=f"daily_bad_text_{idx}",
+                    ))
+    else:
+        bad_text_values = []
 
     material_files = st.file_uploader(
         "자재입고 및 고위험작업",
@@ -2422,103 +2691,169 @@ def render_daily_safety_meeting():
     )
 
     if material_files:
-        if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
-            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. 상단 확대 OCR과 Vision 교차검증으로 시간이 조금 더 걸릴 수 있습니다.")
-        st.markdown("#### 자재입고 및 고위험작업")
+        st.caption(
+            f"{len(material_files)}장 선택됨 · 업로드만으로는 인식하지 않고, 아래 생성 버튼을 누른 뒤 한꺼번에 판독합니다."
+        )
+        with st.expander("선택된 사진 보기", expanded=False):
+            for idx, uploaded in enumerate(material_files, start=1):
+                st.caption(f"{idx}. {uploaded.name} · {format_size(len(uploaded.getvalue()))}")
 
-        for idx, f in enumerate(material_files):
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+    # 핵심: 버튼을 OCR보다 먼저 그린다. 사진 선택 직후에도 버튼이 즉시 보이고 눌린다.
+    create_clicked = st.button(
+        "일일안전회의 PPT 생성",
+        key="daily_create_btn",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(bad_files or material_files),
+    )
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(f.getbuffer())
-                material_original_path = tmp.name
-                temp_paths.append(material_original_path)
-
-            material_jpg_path = convert_to_jpg(material_original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
-            temp_paths.append(material_jpg_path)
-
-            file_digest = hashlib.sha256(f.getvalue()).hexdigest()
-            st.session_state.setdefault("daily_material_analysis_cache", {})
-            cached = st.session_state["daily_material_analysis_cache"].get(file_digest)
-
-            if cached:
-                item = MaterialWorkItem(
-                    image_path=material_jpg_path,
-                    original_name=f.name,
-                    upload_index=idx,
-                    ocr_text=cached.get("ocr_text", ""),
-                    work_type=cached.get("work_type", "material"),
-                    company=cached.get("company", "기타업체"),
-                    number=int(cached.get("number", 0) or 0),
-                )
-            else:
-                with st.spinner(f"{f.name} 정밀 인식 중..."):
-                    item = classify_material_work_image(
-                        material_jpg_path,
-                        original_name=f.name,
-                        upload_index=idx,
-                        ocr_image_path=material_original_path,
-                        api_key=st.secrets.get("GPT_API_KEY", ""),
-                    )
-                st.session_state["daily_material_analysis_cache"][file_digest] = {
-                    "ocr_text": item.ocr_text,
-                    "work_type": item.work_type,
-                    "company": item.company,
-                    "number": item.number,
-                }
-
-            material_items.append(item)
-
-            c1, c2 = st.columns([1, 4])
-            with c1:
-                st.image(material_jpg_path, width=130)
-            with c2:
-                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
-                st.caption(f"{idx + 1}번 / {kind_label} / {item.company} / 번호 {item.number}")
-                st.caption(f.name)
-                # OCR 원문/실패 문구는 화면에 표시하지 않음.
-
-    if material_items:
-        sorted_preview = sort_material_work_items(material_items)
-        with st.expander("자재입고 및 고위험작업 정렬 결과", expanded=False):
-            for order_idx, item in enumerate(sorted_preview, start=1):
-                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
-                st.caption(
-                    f"{order_idx}. {kind_label} / {item.company} / 번호 {item.number} / {item.original_name}"
-                )
-
-    if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
+    if create_clicked:
+        temp_paths = []
         try:
-            with st.spinner("PPT 생성 중..."):
-                sorted_material_items = sort_material_work_items(material_items)
-                ppt = build_daily_ppt(bad_items, sorted_material_items)
+            st.session_state.pop("daily_generated_ppt_bytes", None)
+            st.session_state.pop("daily_generated_ppt_name", None)
 
-            save_generated_ppt_to_bad_photo_storage(ppt, DAILY_OUTPUT_PPT_NAME)
+            total_material = len(material_files or [])
+            progress_bar = st.progress(0)
+            status_box = st.empty()
 
-            st.success("완료!")
-            st.download_button(
-                "일일안전회의 PPT 다운로드",
-                ppt,
-                file_name=DAILY_OUTPUT_PPT_NAME,
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                key="daily_download_btn"
+            bad_items = []
+            material_entries = []
+
+            status_box.info("업로드 사진 준비 중...")
+            for idx, uploaded in enumerate(bad_files or []):
+                suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
+                    temp.write(uploaded.getvalue())
+                    original_path = temp.name
+                temp_paths.append(original_path)
+
+                jpg_path = convert_to_jpg(
+                    original_path,
+                    max_size=DAILY_IMAGE_MAX_SIZE,
+                    quality=DAILY_IMAGE_QUALITY,
+                )
+                temp_paths.append(jpg_path)
+                text_value = bad_text_values[idx] if idx < len(bad_text_values) else ""
+                bad_items.append(DailySlideData(
+                    jpg_path,
+                    text_value,
+                    get_image_orientation(jpg_path),
+                ))
+
+            st.session_state.setdefault("daily_material_analysis_cache", {})
+            cache = st.session_state["daily_material_analysis_cache"]
+            cached_items = []
+            uncached_entries = []
+
+            for idx, uploaded in enumerate(material_files or []):
+                suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
+                file_bytes = uploaded.getvalue()
+                file_digest = hashlib.sha256(file_bytes).hexdigest()
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
+                    temp.write(file_bytes)
+                    original_path = temp.name
+                temp_paths.append(original_path)
+
+                jpg_path = convert_to_jpg(
+                    original_path,
+                    max_size=DAILY_IMAGE_MAX_SIZE,
+                    quality=DAILY_IMAGE_QUALITY,
+                )
+                temp_paths.append(jpg_path)
+
+                cached = cache.get(file_digest)
+                if cached:
+                    cached_items.append(MaterialWorkItem(
+                        image_path=jpg_path,
+                        original_name=uploaded.name,
+                        upload_index=idx,
+                        ocr_text=cached.get("ocr_text", ""),
+                        work_type=cached.get("work_type", "material"),
+                        company=cached.get("company", "기타업체"),
+                        number=int(cached.get("number", 0) or 0),
+                    ))
+                else:
+                    uncached_entries.append({
+                        "image_path": jpg_path,
+                        "ocr_path": original_path,
+                        "original_name": uploaded.name,
+                        "upload_index": idx,
+                        "file_digest": file_digest,
+                    })
+
+                if total_material:
+                    progress_bar.progress(min(18, int(((idx + 1) / total_material) * 18)))
+
+            new_items = []
+            if uncached_entries:
+                status_box.info("자재입고·25대 고위험 상단 제목과 업체명을 판독 중...")
+
+                def update_analysis_progress(done, total, message):
+                    ratio = done / max(1, total)
+                    progress_bar.progress(min(72, 18 + int(ratio * 54)))
+                    status_box.info(f"{message} · {done}/{total}장")
+
+                new_items = classify_material_work_images_fast(
+                    uncached_entries,
+                    api_key=st.secrets.get("GPT_API_KEY", ""),
+                    progress_callback=update_analysis_progress,
+                )
+
+                digest_by_index = {entry["upload_index"]: entry["file_digest"] for entry in uncached_entries}
+                for item in new_items:
+                    digest = digest_by_index.get(item.upload_index)
+                    if digest:
+                        cache[digest] = {
+                            "ocr_text": item.ocr_text,
+                            "work_type": item.work_type,
+                            "company": item.company,
+                            "number": item.number,
+                        }
+
+            material_items = sorted(cached_items + new_items, key=lambda item: item.upload_index)
+            sorted_material_items = sort_material_work_items(material_items)
+
+            progress_bar.progress(78)
+            status_box.info("슬라이드 순서 정리 및 PPT 생성 중...")
+            ppt = build_daily_ppt(bad_items, sorted_material_items)
+            ppt_bytes = ppt.getvalue()
+            st.session_state["daily_generated_ppt_bytes"] = ppt_bytes
+            st.session_state["daily_generated_ppt_name"] = DAILY_OUTPUT_PPT_NAME
+
+            save_generated_ppt_to_bad_photo_storage(io.BytesIO(ppt_bytes), DAILY_OUTPUT_PPT_NAME)
+            progress_bar.progress(100)
+            status_box.success(
+                f"완료 · 자재입고 {sum(1 for item in sorted_material_items if item.work_type == 'material')}장 / "
+                f"25대 고위험 {sum(1 for item in sorted_material_items if item.work_type == 'high_risk')}장"
             )
 
-        except Exception as e:
-            st.error(f"오류 발생: {e}")
-
+        except Exception as error:
+            st.error(f"오류 발생: {error}")
         finally:
-            for p in temp_paths:
-                if os.path.exists(p):
+            for path in temp_paths:
+                if path and os.path.exists(path):
                     try:
-                        os.remove(p)
+                        os.remove(path)
                     except Exception:
                         pass
+
+    # 생성 결과를 session_state에 보관해 Streamlit 재실행 후에도 다운로드 버튼이 사라지지 않게 한다.
+    generated = st.session_state.get("daily_generated_ppt_bytes")
+    if generated:
+        st.download_button(
+            "일일안전회의 PPT 다운로드",
+            data=generated,
+            file_name=st.session_state.get("daily_generated_ppt_name", DAILY_OUTPUT_PPT_NAME),
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            key="daily_download_btn",
+            use_container_width=True,
+        )
 
     st.markdown("---")
     render_bad_photo_storage()
     st.markdown("---")
-
 
 def load_shared_notice() -> str:
     try:
@@ -4471,9 +4806,8 @@ def render_heat_index_log():
     render_heat_completed_file_list()
 
 def main():
-    install_playwright_browser()
-
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
+    install_playwright_browser()
     hide_streamlit_ui()
 
     render_app_title()
