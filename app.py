@@ -61,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 8월 일일안전회의 즉시 버튼·OCR 후처리 버전"
+APP_VERSION = "26년 8월 일일안전회의 고속분류 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -124,10 +124,17 @@ COMPANY_ORDER = [
     "청암기업",
     "유셀네트웍스",
     "엠케이지",
+    "금성",
+    "웰시스템",
     "KEC",
+    "청오",
     "우신에이스",
+    "MS건설",
     "진솔",
     "장한건설",
+    "신영기초개발",
+    "KCC",
+    "씨즌텍",
 ]
 
 COMPANY_ALIAS = {
@@ -1158,6 +1165,152 @@ def extract_sort_number(text: str) -> int:
     return 0
 
 
+
+DAILY_CLASSIFY_BATCH_SIZE = 8
+
+DAILY_CLASSIFY_PROMPT = """
+다음 이미지들은 건설현장 일일안전회의용 사진이다.
+각 이미지를 업로드 순서대로 판독해서 JSON 배열만 반환하라.
+
+각 항목:
+- work_type: "material" 또는 "high_risk"
+- company: 아래 업체 중 하나. 불확실하면 "기타업체"
+- number: 제목/상단 표기에서 순번이 확인되면 정수, 없으면 0
+
+분류 기준:
+- "25대 고위험", "고위험", "선정사유" 등이 확인되면 high_risk
+- 그렇지 않으면 material
+
+업체 허용값:
+원영건업, 청암기업, 유셀네트워크, 엠케이지, 금성, 웰시스템, KEC, 청오,
+우신, MS건설, 진솔, 장한건설, 신영기초개발, KCC, 씨즌텍, 기타업체
+
+업체명 보정:
+- MKG, mkg, 엠케이, 엠케이지 -> 엠케이지
+- KEC, kec, 케이이씨 -> KEC
+- 유셀네트웍스, 유셀네트워크, 유셀 -> 유셀네트워크
+- MS, 엠에스, 엠에스건설 -> MS건설
+- 우신에이스, 우신 -> 우신
+
+순번 표기 예:
+- 업체명-1, 업체명-2
+- 1. 업체명, 2. 업체명
+- 업체명 1, 업체명 2
+
+출력 예:
+[
+  {"work_type":"material","company":"원영건업","number":1},
+  {"work_type":"high_risk","company":"엠케이지","number":2}
+]
+
+설명/코드블록 금지. 입력 이미지 개수와 출력 배열 개수는 반드시 같아야 한다.
+"""
+
+
+def _daily_image_data_url(uploaded_file, max_dim: int = 1500, quality: int = 82) -> str:
+    uploaded_file.seek(0)
+    img = Image.open(uploaded_file)
+    try:
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    w, h = img.size
+    longest = max(w, h)
+    if longest > max_dim:
+        ratio = max_dim / longest
+        img = img.resize(
+            (max(1, int(w * ratio)), max(1, int(h * ratio))),
+            Image.LANCZOS
+        )
+
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality, optimize=True)
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    uploaded_file.seek(0)
+    return f"data:image/jpeg;base64,{b64}"
+
+
+def classify_material_files_with_gpt(api_key: str, material_files) -> List[dict]:
+    results = []
+
+    for start in range(0, len(material_files), DAILY_CLASSIFY_BATCH_SIZE):
+        batch = material_files[start:start + DAILY_CLASSIFY_BATCH_SIZE]
+
+        content = [{"type": "input_text", "text": DAILY_CLASSIFY_PROMPT}]
+        for i, f in enumerate(batch, start=1):
+            content.append({
+                "type": "input_text",
+                "text": f"이미지 {i} / 파일명: {f.name}"
+            })
+            content.append({
+                "type": "input_image",
+                "image_url": _daily_image_data_url(f)
+            })
+
+        headers = {
+            "Authorization": f"Bearer {api_key.strip()}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": "gpt-4o-mini",
+            "input": [{"role": "user", "content": content}],
+        }
+
+        resp = requests.post(
+            "https://api.openai.com/v1/responses",
+            headers=headers,
+            json=payload,
+            timeout=75,
+        )
+        if resp.status_code != 200:
+            raise Exception(f"일일안전회의 이미지 분류 API 오류: {resp.text}")
+
+        data = resp.json()
+        raw = _extract_openai_output_text(data)
+        cleaned = str(raw or "").replace("```json", "").replace("```", "").strip()
+        try:
+            parsed = json.loads(cleaned)
+        except Exception:
+            match = re.search(r"\[.*\]", cleaned, re.S)
+            parsed = json.loads(match.group(0)) if match else []
+
+        if not isinstance(parsed, list) or len(parsed) != len(batch):
+            raise ValueError(
+                f"이미지 분류 개수 불일치: 입력 {len(batch)} / "
+                f"출력 {len(parsed) if isinstance(parsed, list) else 0}"
+            )
+
+        for item in parsed:
+            if not isinstance(item, dict):
+                item = {}
+
+            work_type = str(item.get("work_type", "material")).strip().lower()
+            if work_type not in ("material", "high_risk"):
+                work_type = "material"
+
+            company = str(item.get("company", "기타업체")).strip() or "기타업체"
+            company = {
+                "유셀네트워크": "유셀네트웍스",
+                "우신": "우신에이스",
+            }.get(company, company)
+
+            try:
+                number = int(item.get("number", 0) or 0)
+            except Exception:
+                number = 0
+
+            results.append({
+                "work_type": work_type,
+                "company": company,
+                "number": number,
+            })
+
+    return results
+
+
 def classify_material_work_image(
     image_path: str,
     original_name: str,
@@ -1999,17 +2152,32 @@ def render_daily_safety_meeting():
                             )
                         )
 
-            # 2. 자재입고/25대 고위험 OCR
+            # 2. 자재입고/25대 고위험 고속 분류
             if material_files:
-                progress = st.progress(0, text="자재입고 및 고위험작업 OCR 준비 중...")
+                if "GPT_API_KEY" not in st.secrets:
+                    raise ValueError("Secrets에 GPT_API_KEY 설정 필요")
 
                 total = len(material_files)
-                for idx, f in enumerate(material_files):
-                    progress.progress(
-                        idx / max(1, total),
-                        text=f"OCR 판독 중... {idx + 1}/{total} · {f.name}"
-                    )
+                progress = st.progress(0, text="사진 분류 준비 중...")
 
+                classification_results = []
+
+                for batch_start in range(0, total, DAILY_CLASSIFY_BATCH_SIZE):
+                    batch_end = min(batch_start + DAILY_CLASSIFY_BATCH_SIZE, total)
+                    progress.progress(
+                        batch_start / max(1, total),
+                        text=f"사진 분류 중... {batch_start + 1}~{batch_end}/{total}"
+                    )
+                    batch_files = material_files[batch_start:batch_end]
+                    batch_results = classify_material_files_with_gpt(
+                        st.secrets["GPT_API_KEY"],
+                        batch_files
+                    )
+                    classification_results.extend(batch_results)
+
+                progress.progress(0.72, text="분류 완료 · PPT용 사진 변환 중...")
+
+                for idx, (f, cls) in enumerate(zip(material_files, classification_results)):
                     suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
 
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -2024,15 +2192,24 @@ def render_daily_safety_meeting():
                     )
                     temp_paths.append(material_jpg_path)
 
-                    item = classify_material_work_image(
-                        material_jpg_path,
-                        original_name=f.name,
-                        upload_index=idx,
-                        ocr_image_path=material_original_path
+                    material_items.append(
+                        MaterialWorkItem(
+                            image_path=material_jpg_path,
+                            original_name=f.name,
+                            upload_index=idx,
+                            ocr_text="",
+                            work_type=cls["work_type"],
+                            company=cls["company"],
+                            number=cls["number"],
+                        )
                     )
-                    material_items.append(item)
 
-                progress.progress(1.0, text="OCR 판독 완료")
+                    progress.progress(
+                        0.72 + 0.25 * ((idx + 1) / max(1, total)),
+                        text=f"PPT용 사진 준비 중... {idx + 1}/{total}"
+                    )
+
+                progress.progress(1.0, text="분류 및 사진 준비 완료")
 
             # 3. 정렬 + PPT 생성
             with st.spinner("PPT 생성 중..."):
