@@ -61,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 8월 버전"
+APP_VERSION = "26년 8월 모바일 일일안전회의 버튼 표시 안정화 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -195,6 +195,46 @@ def hide_streamlit_ui():
             min-height: 34px !important;
             padding: 0.25rem 0.4rem !important;
             font-size: 12px !important;
+        }
+
+        /* 일일안전회의 생성 버튼이 모바일/카카오 인앱브라우저에서
+           다른 영역에 덮이지 않도록 독립 레이어로 유지 */
+        div[data-testid="stButton"] {
+            position: relative !important;
+            z-index: 20 !important;
+            clear: both !important;
+        }
+
+        div[data-testid="stDownloadButton"] {
+            position: relative !important;
+            z-index: 20 !important;
+            clear: both !important;
+        }
+
+        .block-container {
+            padding-bottom: 7rem !important;
+        }
+
+        @media (max-width: 768px) {
+            div[data-testid="stButton"] button {
+                min-height: 52px !important;
+                font-size: 17px !important;
+                font-weight: 700 !important;
+            }
+
+            div[data-testid="stDownloadButton"] button {
+                min-height: 48px !important;
+            }
+
+            div[data-testid="stFileUploader"] {
+                margin-bottom: 0.8rem !important;
+            }
+
+            .block-container {
+                padding-left: 0.9rem !important;
+                padding-right: 0.9rem !important;
+                padding-bottom: 9rem !important;
+            }
         }
         </style>
         """,
@@ -1919,16 +1959,21 @@ def render_daily_safety_meeting():
                 st.caption(f.name)
                 # OCR 원문/실패 문구는 화면에 표시하지 않음.
 
-    if material_items:
-        sorted_preview = sort_material_work_items(material_items)
-        with st.expander("자재입고 및 고위험작업 정렬 결과", expanded=False):
-            for order_idx, item in enumerate(sorted_preview, start=1):
-                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
-                st.caption(
-                    f"{order_idx}. {kind_label} / {item.company} / 번호 {item.number} / {item.original_name}"
-                )
+    # 모바일에서 생성 버튼이 아래 부적합사진 저장소 영역과 겹치거나
+    # 화면 밖으로 밀려 클릭하지 못하는 현상을 방지하기 위해,
+    # OCR/사진 처리 직후 독립된 전체폭 버튼으로 먼저 렌더링한다.
+    st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
-    if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
+    daily_create_clicked = st.button(
+        "일일안전회의 PPT 생성",
+        key="daily_create_btn",
+        use_container_width=True,
+        type="primary"
+    )
+
+    st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
+
+    if daily_create_clicked:
         try:
             with st.spinner("PPT 생성 중..."):
                 sorted_material_items = sort_material_work_items(material_items)
@@ -1956,6 +2001,8 @@ def render_daily_safety_meeting():
                     except Exception:
                         pass
 
+    # 생성/다운로드 버튼과 다음 섹션이 모바일에서 시각적으로 겹치지 않도록 여백 확보
+    st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
     st.markdown("---")
     render_bad_photo_storage()
     st.markdown("---")
