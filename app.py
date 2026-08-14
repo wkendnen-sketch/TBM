@@ -11,7 +11,6 @@ import threading
 import zipfile
 import gc
 import tempfile
-import subprocess
 from copy import deepcopy, copy
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
@@ -32,10 +31,6 @@ try:
 except Exception:
     pass
 
-try:
-    from playwright.sync_api import sync_playwright
-except Exception:
-    sync_playwright = None
 
 try:
     import pytesseract
@@ -52,13 +47,6 @@ try:
 except Exception:
     openpyxl = None
 
-try:
-    import cv2
-    import numpy as np
-except Exception:
-    cv2 = None
-    np = None
-
 _PADDLE_OCR = None
 
 
@@ -73,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 7월 인식·속도개선 버전"
+APP_VERSION = "26년 8월 네이버 날씨 캡처 제거·안정화 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -91,8 +79,6 @@ VI_BOX_TEXT = "3"
 MY_BOX_TEXT = "4"
 
 DATE_BOX_TEXT = "DATE_BOX"
-WEATHER_BOX_1_TEXT = "WEATHER_BOX_1"
-WEATHER_BOX_2_TEXT = "WEATHER_BOX_2"
 
 DAILY_PHOTO_BOX_TEXT = "PHOTO_BOX_1"
 DAILY_TEXT_BOX_TEXT = "TEXT_BOX_1"
@@ -103,32 +89,6 @@ BAD_PHOTO_LIMIT_MB = 300
 BAD_PHOTO_LIMIT_BYTES = BAD_PHOTO_LIMIT_MB * 1024 * 1024
 BAD_PHOTO_EXPIRE_SECONDS = 24 * 60 * 60
 
-NAVER_WEATHER_URL = "https://weather.naver.com/today/02370550"
-
-BROWSER_VIEWPORT = {
-    "width": 1920,
-    "height": 2400,
-}
-
-WEATHER_CAPTURE_1 = {
-    "scroll_y": 0,
-    "clip": {
-        "x": 350,
-        "y": 200,
-        "width": 780,
-        "height": 428,
-    }
-}
-
-WEATHER_CAPTURE_2 = {
-    "scroll_y": 300,
-    "clip": {
-        "x": 350,
-        "y": 399,
-        "width": 780,
-        "height": 290,
-    }
-}
 
 
 @dataclass
@@ -159,125 +119,36 @@ class MaterialWorkItem:
     number: int = 0
 
 
-# 자재입고와 25대 고위험작업 양쪽에 공통 적용되는 업체 우선순위.
-# 표기가 줄거나 OCR이 일부 틀려도 COMPANY_ALIAS와 GPT Vision 보조 판독으로
-# 아래 대표 업체명에 정규화한 뒤 이 순서대로 배치한다.
 COMPANY_ORDER = [
     "원영건업",
     "청암기업",
-    "유셀네트워크",
+    "유셀네트웍스",
     "엠케이지",
-    "금성",
-    "웰시스템",
     "KEC",
-    "청오",
-    "우신",
-    "엠에스건설",
+    "우신에이스",
     "진솔",
     "장한건설",
-    "신영기초개발",
-    "KCC",
-    "씨즌텍",
 ]
 
 COMPANY_ALIAS = {
-    "원영건업": [
-        "원영건업", "원영 건업", "원영", "원영건", "원명건업", "원영건엽",
-    ],
-    "청암기업": [
-        "청암기업", "청암 기업", "청암", "청암기엽", "청암업", "청암기엄",
-    ],
-    "유셀네트워크": [
-        "유셀네트워크", "유셀 네트워크", "유셀네트웍스", "유셀 네트웍스",
-        "유셀네트윅스", "유셀네트웍", "유셀네트", "유셀",
-    ],
-    "엠케이지": [
-        "엠케이지", "엠케이쥐", "엠 케 이 지", "MKG", "M.K.G", "MK G",
-    ],
-    "금성": [
-        "금성", "금성건업", "금성 건업", "금성건설", "금성 건설",
-    ],
-    "웰시스템": [
-        "웰시스템", "웰 시스템", "웰씨스템", "월시스템", "웰시스탬",
-    ],
-    "KEC": [
-        "KEC", "K.E.C", "K E C", "케이이씨", "케이 이 씨", "케이이시",
-    ],
-    "청오": [
-        "청오", "청오방수", "청오 방수", "청오건설", "청오 건설",
-    ],
-    "우신": [
-        "우신", "우신에이스", "우신 에이스", "우신에이", "우신이스",
-    ],
-    "엠에스건설": [
-        "엠에스건설", "엠에스 건설", "엠에스", "MS건설", "MS 건설", "M/S", "MS",
-    ],
-    "진솔": [
-        "진솔", "진솔건설", "진솔 건설", "진술", "진슬",
-    ],
-    "장한건설": [
-        "장한건설", "장한 건설", "장한건축", "장한 건축", "장한", "장한전설", "장한건썰",
-    ],
-    "신영기초개발": [
-        "신영기초개발", "신영 기초개발", "신영기초", "신영 기초", "신영개발", "신영",
-    ],
-    "KCC": [
-        "KCC", "K.C.C", "K C C", "케이씨씨", "케이 씨 씨",
-    ],
-    "씨즌텍": [
-        "씨즌텍", "시즌텍", "씨즌테크", "시즌테크", "씨존텍", "씨즌 택",
-    ],
+    "원영건업": ["원영건업", "원영"],
+    "청암기업": ["청암기업", "청암"],
+    "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀"],
+    "엠케이지": ["엠케이지", "MKG", "mkg"],
+    "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이"],
+    "우신에이스": ["우신에이스", "우신"],
+    "진솔": ["진솔"],
+    "장한건설": ["장한건설", "장한"],
 }
 
-# 25대 고위험작업은 상단 제목과 '선정 사유'를 최우선으로 판정한다.
-# 단순히 문서 안에 '위험' 한 단어가 있다는 이유만으로 고위험작업으로 보내지 않는다.
-HIGH_RISK_STRONG_KEYWORDS = [
-    "25대 고위험 작업 검토",
-    "25대고위험작업검토",
-    "25대 고위험작업",
-    "25대고위험작업",
-    "선정 사유",
-    "선정사유",
+HIGH_RISK_KEYWORDS = [
+    "25대 고위험",
+    "25대고위험",
+    "25 대 고위험",
+    "25대",
+    "고위험",
+    "고 위험",
 ]
-
-HIGH_RISK_SUPPORT_KEYWORDS = [
-    "HOLD POINT",
-    "위험요인 및 대책",
-    "위험요인",
-    "단위작업",
-    "자체기준",
-]
-
-MATERIAL_SIGNAL_KEYWORDS = [
-    "자재입고", "자재 입고", "자재반입", "자재 반입", "반입예정", "반입 예정",
-    "차량동선", "차량 동선", "트럭동선", "트럭 동선", "덤프", "유도원 위치",
-    "유도원", "반입", "게이트", "GATE",
-]
-
-MATERIAL_VISION_MODEL = "gpt-4o-mini"
-MATERIAL_VISION_BATCH_SIZE = 3
-MATERIAL_VISION_TIMEOUT = 120
-
-
-@st.cache_resource(show_spinner=False)
-def install_playwright_browser():
-    """Chromium 설치 확인은 서버 실행 중 한 번만 수행한다.
-
-    Streamlit은 입력할 때마다 스크립트를 다시 실행하므로, 캐시하지 않으면
-    사진 선택·텍스트 입력 때마다 playwright install 명령이 반복되어 모바일에서
-    화면이 멈춘 것처럼 보일 수 있다.
-    """
-    try:
-        subprocess.run(
-            ["playwright", "install", "chromium"],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=180,
-        )
-    except Exception:
-        pass
-    return True
 
 
 def hide_streamlit_ui():
@@ -579,9 +450,9 @@ def render_bad_photo_storage():
     upload_files = st.file_uploader(
         "부적합사진 파일 업로드",
         accept_multiple_files=True,
-        type=None,  # 부적합사진 공유
+        type=None,  # 확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 업로드 가능
         key="daily_bad_photo_upload_uploader",
-        help="부적합사진 공유"
+        help="확장자 제한 없음: 사진, 영상, MP3, 압축파일, 문서 등 거의 모든 파일 업로드 가능"
     )
 
     if upload_files:
@@ -1134,106 +1005,73 @@ def fuzzy_contains(text: str, candidates: List[str], threshold: float = 0.72) ->
     return False
 
 
-def high_risk_evidence_score(text: str) -> int:
-    """25대 고위험 양식의 확실한 표식에 가중치를 주어 판정 점수를 계산."""
-    compact = normalize_for_match(text)
-    if not compact:
-        return 0
-
-    score = 0
-    if fuzzy_contains(compact, HIGH_RISK_STRONG_KEYWORDS[:4], threshold=0.72):
-        score += 7
-    if fuzzy_contains(compact, ["선정사유", "선정 사유", "선정사유:", "선정사유："], threshold=0.70):
-        score += 6
-    if fuzzy_contains(compact, ["25대고위험", "25대 고위험", "고위험작업검토"], threshold=0.70):
-        score += 4
-
-    support_hits = 0
-    for keyword in HIGH_RISK_SUPPORT_KEYWORDS:
-        keyword_norm = normalize_for_match(keyword)
-        if keyword_norm and keyword_norm in compact:
-            support_hits += 1
-    score += min(4, support_hits)
-
-    # 숫자 25와 고위험 계열 문구가 따로 인식된 경우 보조 점수.
-    has_25 = bool(re.search(r"(?:^|\D)2\s*5(?:\D|$)|이십오", str(text or "")))
-    has_risk = fuzzy_contains(compact, ["고위험", "고위헙", "고위혐", "고위힘"], threshold=0.68)
-    if has_25 and has_risk:
-        score += 3
-    return score
-
-
-def material_evidence_score(text: str, company: str = "기타업체") -> int:
-    compact = normalize_for_match(text)
-    if not compact:
-        return 0
-
-    score = 0
-    for keyword in MATERIAL_SIGNAL_KEYWORDS:
-        if normalize_for_match(keyword) in compact:
-            score += 1
-    score = min(score, 5)
-
-    # 좌측 상단의 날짜 + 괄호 업체명 형태는 자재입고 사진의 강한 보조 신호다.
-    if re.search(r"(?:20)?\d{2}[./-]\d{1,2}[./-]\d{1,2}", str(text or "")):
-        score += 2
-    if company != "기타업체":
-        score += 2
-    return score
-
-
 def detect_high_risk(text: str) -> bool:
-    """'25대 고위험 작업 검토' 또는 '선정 사유'가 확인될 때 고위험으로 판정."""
-    return high_risk_evidence_score(text) >= 5
-
-
-def _normalized_tokens(text: str) -> List[str]:
-    tokens = re.findall(r"[가-힣A-Za-z0-9./]+", str(text or ""))
-    return [normalize_for_match(token) for token in tokens if normalize_for_match(token)]
-
-
-def _alias_exact_match(compact: str, tokens: List[str], alias: str) -> bool:
-    alias_norm = normalize_for_match(alias)
-    if not alias_norm:
-        return False
-
-    # MS처럼 짧은 영문 약칭은 긴 OCR 문장 속 부분 문자열로 찾으면 오탐이 많다.
-    # 짧은 별칭은 독립 토큰으로 읽혔을 때만 인정한다.
-    if len(alias_norm) <= 2:
-        return alias_norm in tokens
-    return alias_norm in compact
-
-
-def detect_company_with_score(text: str) -> Tuple[str, float]:
-    """업체명을 대표명으로 정규화하고 매칭 신뢰도를 함께 반환."""
     compact = normalize_for_match(text)
-    tokens = _normalized_tokens(text)
+    loose = str(text or "")
 
-    # 긴 별칭부터 정확 매칭해 '우신'보다 '우신에이스' 같은 표기를 우선 처리한다.
-    exact_candidates = []
+    if "고위험" in compact or "고 위험" in loose:
+        return True
+    if "25대" in compact or "25 대" in loose:
+        return True
+
+    # OCR에서 숫자/한글이 일부 깨지는 경우 보정
+    high_risk_candidates = HIGH_RISK_KEYWORDS + [
+        "이십오대고위험",
+        "25고위험",
+        "25대위험",
+        "고위헙",
+        "고위힘",
+        "고위혐",
+        "고위험작업",
+        "고위험 작업",
+    ]
+
+    if fuzzy_contains(compact, high_risk_candidates, threshold=0.70):
+        return True
+
+    # 25와 위험류 단어가 따로 읽힌 경우
+    has_25 = bool(re.search(r"2\s*5|25|이십오", compact))
+    has_risk = fuzzy_contains(compact, ["고위험", "위험", "위헙", "위혐"], threshold=0.68)
+    return has_25 and has_risk
+
+
+def detect_company(text: str) -> str:
+    compact = normalize_for_match(text)
+
+    # 자주 틀리는 OCR 후보 추가
+    extra_alias = {
+        "원영건업": ["원영건업", "원영", "원영건", "원명건업"],
+        "청암기업": ["청암기업", "청암", "청암기엽", "청암업"],
+        "유셀네트웍스": ["유셀네트웍스", "유셀네트윅스", "유셀네트", "유셀", "유셀네트워크", "유셀네트웍"],
+        "엠케이지": ["엠케이지", "MKG", "mkg", "엠케이", "엠케", "MK G"],
+        "KEC": ["KEC", "kec", "케이이씨", "케이씨", "케이", "K E C"],
+        "우신에이스": ["우신에이스", "우신", "우신에이", "우신이스"],
+        "진솔": ["진솔", "진술", "진슬", "진솔건", "진솔건설"],
+        "장한건설": ["장한건설", "장한", "장한전설", "장한건", "장한건썰"],
+    }
+
     for company in COMPANY_ORDER:
-        for alias in COMPANY_ALIAS.get(company, [company]):
-            exact_candidates.append((len(normalize_for_match(alias)), company, alias))
+        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
+        for alias in aliases:
+            if normalize_for_match(alias) in compact:
+                return company
 
-    for _, company, alias in sorted(exact_candidates, reverse=True):
-        if _alias_exact_match(compact, tokens, alias):
-            return company, 1.0
+    # OCR 오인식 보정: 토큰 및 슬라이딩 유사도 기반 판단
+    tokens = re.findall(r"[가-힣A-Za-z0-9]{2,}", str(text or ""))
+    compact_tokens = [normalize_for_match(t) for t in tokens]
+    compact_tokens.append(compact)
 
-    # OCR 일부 글자 오인식 보정. 2글자 약칭은 유사도 추정에서 제외한다.
     best_company = "기타업체"
     best_score = 0.0
-    comparison_tokens = list(tokens)
-    if compact:
-        comparison_tokens.append(compact)
 
     for company in COMPANY_ORDER:
-        for alias in COMPANY_ALIAS.get(company, [company]):
+        aliases = extra_alias.get(company, COMPANY_ALIAS.get(company, [company]))
+        for alias in aliases:
             alias_norm = normalize_for_match(alias)
-            if len(alias_norm) < 3:
+            if not alias_norm:
                 continue
-
-            for token in comparison_tokens:
-                if len(token) < 3:
+            for token in compact_tokens:
+                if len(token) < 2:
                     continue
 
                 # 토큰 전체 비교
@@ -1242,9 +1080,9 @@ def detect_company_with_score(text: str) -> Tuple[str, float]:
                     best_score = score
                     best_company = company
 
-                # 긴 토큰 안에 업체명이 붙어서 읽힌 경우 부분 비교
+                # 긴 토큰 안에 업체명이 섞여 있는 경우 부분 비교
                 n = len(alias_norm)
-                if len(token) >= n:
+                if len(token) >= n >= 2:
                     for i in range(0, len(token) - n + 1):
                         part = token[i:i + n]
                         score = SequenceMatcher(None, alias_norm, part).ratio()
@@ -1252,377 +1090,48 @@ def detect_company_with_score(text: str) -> Tuple[str, float]:
                             best_score = score
                             best_company = company
 
-    if best_score >= 0.80:
-        return best_company, best_score
-    return "기타업체", best_score
+    if best_score >= 0.68:
+        return best_company
 
-
-def detect_company(text: str) -> str:
-    return detect_company_with_score(text)[0]
+    return "기타업체"
 
 
 def extract_sort_number(text: str) -> int:
-    """제목의 업체명 뒤에 붙은 슬라이드 순번을 다양한 형식으로 추출한다.
-
-    지원 예시:
-    - (원영건업)-1, (원영건업) - 2, (원영건업)_3
-    - (원영건업) 1., (원영건업) 2), (원영건업) (3)
-    - (원영건업) 1번, (원영건업) 제2, (원영건업) No.3, (원영건업) #4
-    - 원영건업-1, 원영건업 2. 처럼 괄호가 없는 제목/파일명
-
-    날짜(26.07.23), 층수, 우측 25대 작업목록 번호를 순번으로 잘못 잡지 않도록
-    업체명 또는 고위험 제목과 같은 줄에 있는 끝번호만 우선 인정한다.
-    """
     raw = str(text or "")
-    if not raw.strip():
-        return 0
 
-    # OCR에서 여러 전처리 결과가 이어붙는 경우를 고려해 줄 단위로 우선 검사한다.
-    lines = [line.strip() for line in re.split(r"[\n\r]+", raw) if line.strip()]
-
-    # 날짜는 순번 후보에서 제외한다.
-    def strip_dates(value: str) -> str:
-        value = re.sub(r"(?:20)?\d{2}\s*[./-]\s*\d{1,2}\s*[./-]\s*\d{1,2}", " ", value)
-        value = re.sub(r"\b\d{1,2}\s*월\s*\d{1,2}\s*일\b", " ", value)
-        return value
-
-    # 업체명 뒤 순번의 허용 표기. 숫자는 제목 끝에 있어야 한다.
-    suffix = (
-        r"\s*(?:[-–—_:/]\s*|#\s*|"
-        r"(?:NO\.?|N0\.?|PAGE|P\.?|슬라이드|순번|제)\s*[:：#-]?\s*)?"
-        r"(?:\(\s*)?(\d{1,2})(?:\s*\))?"
-        r"(?:\s*(?:번|차|PAGE|P))?\s*[.)]?\s*$"
-    )
-
-    # 1) 괄호 업체명 바로 뒤의 번호를 가장 강하게 인정한다.
-    parenthesized_company = re.compile(r"\([^\n\r)]{1,50}\)" + suffix, re.IGNORECASE)
-    for line in lines:
-        cleaned = strip_dates(line)
-        match = parenthesized_company.search(cleaned)
-        if match:
-            try:
-                number = int(match.group(1))
-                if 1 <= number <= 99:
-                    return number
-            except Exception:
-                pass
-
-    # 2) 등록된 업체 별칭이 포함된 제목/파일명 끝번호를 인정한다.
-    aliases = []
-    for company in COMPANY_ORDER:
-        aliases.extend(COMPANY_ALIAS.get(company, [company]))
-    aliases = sorted({alias for alias in aliases if alias}, key=len, reverse=True)
-
-    for line in lines:
-        cleaned = strip_dates(line)
-        compact = normalize_for_match(cleaned)
-        for alias in aliases:
-            alias_norm = normalize_for_match(alias)
-            if not alias_norm or alias_norm not in compact:
-                continue
-            # 원문에서 별칭 뒤에 오는 끝번호를 찾는다. 영문은 대소문자 무시.
-            pattern = re.compile(re.escape(alias) + suffix, re.IGNORECASE)
-            match = pattern.search(cleaned)
-            if match:
-                try:
-                    number = int(match.group(1))
-                    if 1 <= number <= 99:
-                        return number
-                except Exception:
-                    pass
-
-    # 3) '25대 고위험 작업 검토'가 있는 제목 줄의 끝번호를 보조 인정한다.
-    high_risk_title = re.compile(
-        r"(?:25\s*대\s*)?고위험\s*작업\s*검토[^\n\r]{0,100}?" + suffix,
-        re.IGNORECASE,
-    )
-    for line in lines:
-        cleaned = strip_dates(line)
-        match = high_risk_title.search(cleaned)
-        if match:
-            try:
-                number = int(match.group(1))
-                if 1 <= number <= 99:
-                    return number
-            except Exception:
-                pass
-
-    # 4) 명시적인 순번 표기만 마지막 보조 수단으로 인정한다.
-    explicit_patterns = [
-        r"(?:페이지|PAGE|슬라이드|NO\.?|N0\.?|순번)\s*[:：#-]?\s*(\d{1,2})\s*(?:번|차|PAGE|P)?\b",
-        r"#\s*(\d{1,2})\b",
+    # 엠케이지 1. 지게차 / 진솔-2 / KEC 지하 2층 등 대부분 대응
+    patterns = [
+        r"(?:지하|B)\s*[-]?\s*(\d+)\s*층",
+        r"[-–_]\s*(\d+)",
+        r"\b(\d+)\s*[.)]",
+        r"(?:^|\s)(\d+)(?:\s|$)",
     ]
-    cleaned_raw = strip_dates(raw)
-    for pattern in explicit_patterns:
-        match = re.search(pattern, cleaned_raw, flags=re.IGNORECASE)
-        if match:
+
+    for pattern in patterns:
+        m = re.search(pattern, raw, flags=re.IGNORECASE)
+        if m:
             try:
-                number = int(match.group(1))
-                if 1 <= number <= 99:
-                    return number
+                return int(m.group(1))
             except Exception:
                 pass
 
     return 0
 
 
-def _material_image_data_url(img: Image.Image, max_dim: int = 1500, quality: int = 88) -> str:
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    width, height = img.size
-    longest = max(width, height)
-    if longest > max_dim:
-        ratio = max_dim / longest
-        img = img.resize((max(1, int(width * ratio)), max(1, int(height * ratio))), Image.LANCZOS)
-    buffer = io.BytesIO()
-    img.save(buffer, format="JPEG", quality=quality, optimize=True)
-    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
-    return f"data:image/jpeg;base64,{encoded}"
-
-
-def make_material_vision_images(image_path: str) -> List[str]:
-    """전체 문맥과 상단 제목 영역을 한 번의 Vision 호출에 함께 전달."""
-    img = Image.open(image_path)
-    try:
-        img.seek(0)
-    except Exception:
-        pass
-    img = ImageOps.exif_transpose(img)
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    full = ImageOps.autocontrast(img, cutoff=1)
-    full = ImageEnhance.Sharpness(full).enhance(1.7)
-
-    top_height = max(1, int(img.height * 0.34))
-    top = img.crop((0, 0, img.width, top_height))
-    top = ImageOps.autocontrast(top, cutoff=1)
-    top = ImageEnhance.Contrast(top).enhance(1.45)
-    top = ImageEnhance.Sharpness(top).enhance(2.7)
-
-    return [
-        _material_image_data_url(full, max_dim=1250, quality=82),
-        _material_image_data_url(top, max_dim=1550, quality=87),
-    ]
-
-
-def _extract_response_output_text(data: dict) -> str:
-    if data.get("output_text"):
-        return str(data.get("output_text") or "")
-    result = ""
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") == "output_text":
-                result += str(content.get("text", "") or "")
-    return result
-
-
-def _parse_single_json_object(text: str) -> dict:
-    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(cleaned)
-    except Exception:
-        match = re.search(r"\{.*\}", cleaned, flags=re.S)
-        parsed = json.loads(match.group(0)) if match else {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def analyze_material_work_with_gpt(
-    api_key: str,
-    image_path: str,
-    original_name: str,
-    local_ocr_text: str,
-) -> dict:
-    """사진당 GPT-4o-mini Vision 1회만 사용해 분류·업체를 교차검증한다."""
-    if not api_key:
-        return {}
-
-    company_list = ", ".join(COMPANY_ORDER)
-    prompt = f"""이 이미지는 건설현장 일일안전회의 PPT에 들어갈 원본 사진이다.
-첫 번째 이미지는 전체 화면이고 두 번째 이미지는 같은 사진의 상단 제목 확대본이다.
-두 이미지를 별개의 사진으로 세지 말고 동일 사진을 함께 대조해서 아래를 판정하라.
-
-분류 규칙:
-1. 상단에 '25대 고위험 작업 검토', '25대 고위험작업', '선정 사유'가 있거나,
-   우측에 25대 고위험 단위작업 목록과 선정 항목이 명확하면 work_type은 high_risk이다.
-2. 위 고위험 고유 표식이 없고, 상단에 날짜와 업체명이 있으며 자재 반입·차량·트럭·유도원·동선·반입예정 내용이면 material이다.
-3. '위험', '안전', 'Hold Point' 같은 일반 문구 하나만으로 high_risk로 판정하지 마라.
-4. 애매하면 상단 제목과 '선정 사유' 유무를 최우선으로 확인한다.
-
-업체명 규칙:
-- 반드시 다음 대표명 중 하나로 정규화하거나, 판단 불가하면 '기타업체'로 적는다:
-  {company_list}
-- 유셀네트웍스/유셀네트워크/유셀은 유셀네트워크,
-  MKG/엠케이지는 엠케이지,
-  KEC/케이이씨는 KEC,
-  청오방수/청오는 청오,
-  우신에이스/우신은 우신,
-  MS/MS건설/엠에스건설은 엠에스건설,
-  장한건축/장한건설은 장한건설,
-  신영/신영기초개발은 신영기초개발,
-  시즌텍/씨즌텍은 씨즌텍으로 적는다.
-- 상단 괄호 안 업체명을 가장 우선해서 읽고 OCR 일부 오타는 문맥상 보정한다.
-
-제목의 업체명 뒤에 붙은 슬라이드 순번을 number에 적는다. 표기 방식은 다양할 수 있다.
-예: '(업체명)-1', '(업체명) - 2', '(업체명)_3', '(업체명) 1.', '(업체명) 2)',
-'(업체명) (3)', '(업체명) 1번', '(업체명) 제2', '(업체명) No.3', '(업체명) #4',
-또는 괄호 없이 '업체명-1', '업체명 2.'처럼 적힐 수 있다.
-날짜의 일자 숫자, 층수, 우측 25대 단위작업 목록 번호는 슬라이드 순번으로 읽지 마라.
-업체명 또는 상단 제목과 같은 줄의 끝에 붙은 번호만 순번으로 인정하고, 없으면 0이다.
-파일명: {original_name}
-로컬 OCR 참고문자(틀릴 수 있음): {local_ocr_text[:3500]}
-
-아래 JSON 객체만 출력하라. 설명과 코드블록은 금지한다.
-{{"work_type":"material 또는 high_risk", "company":"대표 업체명 또는 기타업체", "number":0, "confidence":0.0, "evidence":"판정에 사용한 짧은 문구"}}"""
-
-    content = [{"type": "input_text", "text": prompt}]
-    for image_url in make_material_vision_images(image_path):
-        content.append({"type": "input_image", "image_url": image_url})
-
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={
-            "Authorization": f"Bearer {api_key.strip()}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "model": MATERIAL_VISION_MODEL,
-            "input": [{"role": "user", "content": content}],
-        },
-        timeout=80,
-    )
-    if response.status_code != 200:
-        return {}
-
-    parsed = _parse_single_json_object(_extract_response_output_text(response.json()))
-    work_type = str(parsed.get("work_type", "") or "").strip().lower()
-    if work_type not in ("material", "high_risk"):
-        work_type = ""
-
-    company_raw = str(parsed.get("company", "") or "").strip()
-    company = detect_company(company_raw)
-    if company == "기타업체" and company_raw in COMPANY_ORDER:
-        company = company_raw
-
-    try:
-        number = int(parsed.get("number", 0) or 0)
-    except Exception:
-        number = 0
-    try:
-        confidence = float(parsed.get("confidence", 0.0) or 0.0)
-    except Exception:
-        confidence = 0.0
-
-    return {
-        "work_type": work_type,
-        "company": company,
-        "number": max(0, number),
-        "confidence": max(0.0, min(1.0, confidence)),
-        "evidence": str(parsed.get("evidence", "") or "").strip(),
-    }
-
-
-def needs_material_vision_review(
-    combined_text: str,
-    local_work_type: str,
-    local_company: str,
-    local_company_score: float,
-    local_high_score: int,
-) -> bool:
-    """명확한 사진은 로컬 OCR만 사용하고 애매한 사진만 Vision 1회 보조.
-
-    전체 사진을 무조건 API에 보내지 않아 평균 API 사용량을 억제하면서,
-    상단 제목·선정사유·업체명이 불명확한 사진은 정밀 판독한다.
-    """
-    compact = normalize_for_match(combined_text)
-    if not compact:
-        return True
-    if local_company == "기타업체" or local_company_score < 0.78:
-        return True
-
-    if local_work_type == "high_risk":
-        # 제목이나 선정사유가 확실하게 뒷받침되면 로컬 결과를 그대로 사용한다.
-        return local_high_score < 7
-
-    # 자재입고는 '고위험 문구가 없음'만으로 확정하지 않고,
-    # 반입 관련 고유 문구가 실제로 읽혔을 때만 API를 생략한다.
-    clear_material_markers = [
-        "자재입고", "자재반입", "반입예정", "반입계획", "트럭1동선", "트럭2동선",
-        "반입차량", "납품차량", "자재하역",
-    ]
-    has_clear_material_marker = any(
-        normalize_for_match(marker) in compact for marker in clear_material_markers
-    )
-    has_high_risk_support = any(
-        normalize_for_match(marker) in compact
-        for marker in ("선정사유", "HOLD POINT", "위험요인 및 대책", "단위작업", "자체기준")
-    )
-    if has_clear_material_marker and not has_high_risk_support:
-        return False
-    if len(compact) < 45:
-        return True
-    return True
-
-
 def classify_material_work_image(
     image_path: str,
     original_name: str,
     upload_index: int,
-    ocr_image_path: str = None,
-    api_key: str = "",
+    ocr_image_path: str = None
 ) -> MaterialWorkItem:
-    # 1차: 원본 이미지 로컬 OCR. 2차: 사진당 Vision API 1회 교차검증.
-    # API 실패 시에도 기존 OCR 결과로 정상 동작한다.
+    # OCR은 원본 이미지로, PPT 삽입은 변환/축소된 JPG로 분리
     ocr_source = ocr_image_path or image_path
     ocr_text = extract_ocr_text(ocr_source, top_ratio=0.60)
     combined_text = f"{ocr_text} {original_name}"
 
-    local_company, local_company_score = detect_company_with_score(combined_text)
-    local_high_score = high_risk_evidence_score(combined_text)
-    local_material_score = material_evidence_score(combined_text, local_company)
-    local_work_type = "high_risk" if local_high_score >= 5 else "material"
-    local_number = extract_sort_number(combined_text)
-
-    vision = {}
-    use_vision = needs_material_vision_review(
-        combined_text=combined_text,
-        local_work_type=local_work_type,
-        local_company=local_company,
-        local_company_score=local_company_score,
-        local_high_score=local_high_score,
-    )
-    if use_vision:
-        try:
-            vision = analyze_material_work_with_gpt(
-                api_key=api_key,
-                image_path=ocr_source,
-                original_name=original_name,
-                local_ocr_text=ocr_text,
-            )
-        except Exception:
-            vision = {}
-
-    work_type = local_work_type
-    company = local_company
-    number = local_number
-
-    # Vision 신뢰도가 충분하면 상단 확대 판독 결과를 우선 사용한다.
-    vision_confidence = float(vision.get("confidence", 0.0) or 0.0)
-    if vision.get("work_type") in ("material", "high_risk") and vision_confidence >= 0.62:
-        work_type = vision["work_type"]
-    elif local_high_score >= 5:
-        work_type = "high_risk"
-    elif local_material_score >= 3:
-        work_type = "material"
-
-    vision_company = vision.get("company", "기타업체")
-    if vision_company in COMPANY_ORDER and vision_confidence >= 0.58:
-        company = vision_company
-    elif local_company_score < 0.70:
-        company = local_company
-
-    if int(vision.get("number", 0) or 0) > 0 and vision_confidence >= 0.58:
-        number = int(vision["number"])
+    work_type = "high_risk" if detect_high_risk(combined_text) else "material"
+    company = detect_company(combined_text)
+    number = extract_sort_number(combined_text)
 
     return MaterialWorkItem(
         image_path=image_path,
@@ -1634,277 +1143,6 @@ def classify_material_work_image(
         number=number,
     )
 
-
-def ocr_with_tesseract_fast(img: Image.Image) -> str:
-    """자재/고위험 문서의 상단 제목만 빠르게 읽는 Tesseract 보조 OCR.
-
-    기존 ocr_with_tesseract는 언어·PSM 조합을 최대 16회 실행해 정확도는 높지만
-    모바일 Streamlit에서는 사진 한 장당 시간이 지나치게 길어질 수 있다.
-    이 함수는 실패 보조용으로 최대 2회만 실행한다.
-    """
-    if pytesseract is None:
-        return ""
-
-    attempts = [
-        ("kor+eng", "--oem 3 --psm 6"),
-        ("kor+eng", "--oem 3 --psm 11"),
-    ]
-    best = ""
-    for lang, config in attempts:
-        try:
-            candidate = pytesseract.image_to_string(img, lang=lang, config=config)
-        except Exception:
-            try:
-                candidate = pytesseract.image_to_string(img, config=config)
-            except Exception:
-                continue
-        candidate = normalize_ocr_text(candidate)
-        if len(normalize_for_match(candidate)) > len(normalize_for_match(best)):
-            best = candidate
-    return best
-
-
-def extract_material_fast_ocr(image_path: str) -> str:
-    """Vision 실패 사진에만 사용하는 빠른 상단 OCR.
-
-    전체/좌우/중앙 6개 영역 × 전처리 7종을 모두 돌리던 기존 정밀 OCR 대신,
-    업체명·25대 고위험 제목·선정사유가 실제로 위치하는 상단 영역 2종만 읽는다.
-    """
-    try:
-        img = Image.open(image_path)
-        try:
-            img.seek(0)
-        except Exception:
-            pass
-        img = ImageOps.exif_transpose(img)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        top_h = max(1, int(img.height * 0.46))
-        top = img.crop((0, 0, img.width, top_h))
-        longest = max(top.size)
-        if longest < 1900:
-            ratio = 1900 / max(1, longest)
-            top = top.resize((max(1, int(top.width * ratio)), max(1, int(top.height * ratio))), Image.LANCZOS)
-        elif longest > 3200:
-            ratio = 3200 / longest
-            top = top.resize((max(1, int(top.width * ratio)), max(1, int(top.height * ratio))), Image.LANCZOS)
-
-        color = ImageOps.autocontrast(top, cutoff=1)
-        color = ImageEnhance.Sharpness(color).enhance(2.0)
-        gray = ImageOps.autocontrast(top.convert("L"), cutoff=1)
-        gray = ImageEnhance.Contrast(gray).enhance(2.0)
-        gray = ImageEnhance.Sharpness(gray).enhance(2.8)
-
-        texts = []
-        seen = set()
-        paddle = get_paddle_ocr()
-        if paddle is not None:
-            append_unique_text(texts, seen, ocr_with_paddle(color))
-            append_unique_text(texts, seen, ocr_with_paddle(gray))
-
-        # Paddle이 없거나 상단 제목이 거의 안 읽힌 경우에만 Tesseract를 짧게 보조한다.
-        combined = normalize_ocr_text("\n".join(texts))
-        if len(normalize_for_match(combined)) < 24:
-            append_unique_text(texts, seen, ocr_with_tesseract_fast(gray))
-
-        return normalize_ocr_text("\n".join(texts))
-    except Exception:
-        return ""
-
-
-def _parse_json_array_objects(text: str) -> List[dict]:
-    cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
-    try:
-        parsed = json.loads(cleaned)
-    except Exception:
-        match = re.search(r"\[.*\]", cleaned, flags=re.S)
-        parsed = json.loads(match.group(0)) if match else []
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    return [item for item in parsed if isinstance(item, dict)] if isinstance(parsed, list) else []
-
-
-def analyze_material_work_batch_with_gpt(api_key: str, entries: List[dict]) -> dict:
-    """최대 3장의 전체본+상단 확대본을 한 번의 Vision 요청으로 판독한다.
-
-    사진마다 API를 직렬 호출하던 구조보다 네트워크 대기 횟수를 크게 줄이면서,
-    각 사진은 전체 문맥과 상단 제목을 모두 확인한다.
-    반환값은 upload_index를 키로 하는 판독 결과 사전이다.
-    """
-    if not api_key or not entries:
-        return {}
-
-    company_list = ", ".join(COMPANY_ORDER)
-    prompt = f"""아래에는 건설현장 일일안전회의용 사진이 여러 세트 있다.
-각 세트는 '사진 N 전체'와 '사진 N 상단 확대'가 같은 원본이다. 세트끼리 섞지 말고 사진 N마다 하나씩 판정하라.
-
-분류 기준:
-- 상단에 '25대 고위험 작업 검토', '25대 고위험작업', '선정 사유'가 있거나 우측 25대 단위작업 표가 명확하면 high_risk.
-- 위 고위험 고유 표식이 없고 날짜+업체명, 차량·트럭·유도원·동선·반입 예정 내용이면 material.
-- 일반적인 '위험', '안전', 'Hold Point' 한 단어만으로 high_risk로 보내지 마라.
-- 고위험 고유 표식이 없으면 기본적으로 material로 판정한다.
-
-업체는 다음 대표명 중 하나로 정규화하고, 끝까지 불명확하면 기타업체로 적는다:
-{company_list}
-유셀네트웍스/유셀은 유셀네트워크, MKG는 엠케이지, 케이이씨는 KEC,
-청오방수는 청오, 우신에이스는 우신, MS/MS건설은 엠에스건설,
-장한건축은 장한건설, 신영은 신영기초개발, 시즌텍은 씨즌텍으로 통합한다.
-상단 괄호 안 업체명을 최우선으로 읽고 일부 글자 오독은 업체 목록 문맥으로 보정한다.
-
-순번 number는 업체명 또는 상단 제목과 같은 줄 끝에 붙은 번호만 인정한다.
-- 허용: (업체)-1, (업체) -2, (업체)_3, (업체) 1., (업체) 2), (업체)(3), 1번, 제2, No.3, #4
-- 날짜 숫자, 층수, 우측 25대 단위작업표 번호는 순번이 아니다.
-- 순번이 없으면 0.
-
-각 사진마다 반드시 아래 JSON 배열로만 답한다. index는 제공된 사진 번호 그대로 적는다.
-[
-  {{"index":1,"work_type":"material 또는 high_risk","company":"대표 업체명 또는 기타업체","number":0,"confidence":0.0,"evidence":"상단에서 확인한 짧은 근거"}}
-]"""
-
-    content = [{"type": "input_text", "text": prompt}]
-    for order, entry in enumerate(entries, start=1):
-        content.append({
-            "type": "input_text",
-            "text": f"사진 {order} 전체 / 파일명: {entry.get('original_name', '')}",
-        })
-        images = make_material_vision_images(entry["ocr_path"])
-        if images:
-            content.append({"type": "input_image", "image_url": images[0]})
-        content.append({"type": "input_text", "text": f"사진 {order} 상단 확대"})
-        if len(images) > 1:
-            content.append({"type": "input_image", "image_url": images[1]})
-
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
-        json={"model": MATERIAL_VISION_MODEL, "input": [{"role": "user", "content": content}]},
-        timeout=MATERIAL_VISION_TIMEOUT,
-    )
-    if response.status_code != 200:
-        return {}
-
-    parsed_items = _parse_json_array_objects(_extract_response_output_text(response.json()))
-    results = {}
-    for parsed in parsed_items:
-        try:
-            order = int(parsed.get("index", 0) or 0)
-        except Exception:
-            continue
-        if not (1 <= order <= len(entries)):
-            continue
-        entry = entries[order - 1]
-
-        work_type = str(parsed.get("work_type", "") or "").strip().lower()
-        if work_type not in ("material", "high_risk"):
-            work_type = ""
-
-        company_raw = str(parsed.get("company", "") or "").strip()
-        company = detect_company(company_raw)
-        if company_raw in COMPANY_ORDER:
-            company = company_raw
-
-        try:
-            number = max(0, int(parsed.get("number", 0) or 0))
-        except Exception:
-            number = 0
-        try:
-            confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0.0) or 0.0)))
-        except Exception:
-            confidence = 0.0
-
-        results[entry["upload_index"]] = {
-            "work_type": work_type,
-            "company": company,
-            "number": number,
-            "confidence": confidence,
-            "evidence": str(parsed.get("evidence", "") or "").strip(),
-        }
-    return results
-
-
-def classify_material_work_images_fast(
-    prepared_entries: List[dict],
-    api_key: str = "",
-    progress_callback=None,
-) -> List[MaterialWorkItem]:
-    """업로드 사진을 배치 Vision 우선으로 판독하고 실패분만 빠른 로컬 OCR로 보완."""
-    vision_results = {}
-    total = len(prepared_entries)
-
-    if api_key:
-        chunks = [
-            prepared_entries[i:i + MATERIAL_VISION_BATCH_SIZE]
-            for i in range(0, total, MATERIAL_VISION_BATCH_SIZE)
-        ]
-        for chunk_index, chunk in enumerate(chunks):
-            try:
-                vision_results.update(analyze_material_work_batch_with_gpt(api_key, chunk))
-            except Exception:
-                pass
-            if progress_callback:
-                progress_callback(
-                    min(total, (chunk_index + 1) * MATERIAL_VISION_BATCH_SIZE),
-                    total,
-                    "상단 제목과 업체명 판독 중",
-                )
-
-    items = []
-    for position, entry in enumerate(prepared_entries, start=1):
-        vision = vision_results.get(entry["upload_index"], {})
-        confidence = float(vision.get("confidence", 0.0) or 0.0)
-        work_type = vision.get("work_type", "")
-        company = vision.get("company", "기타업체")
-        number = int(vision.get("number", 0) or 0)
-        ocr_text = ""
-
-        vision_valid = work_type in ("material", "high_risk") and confidence >= 0.50
-        # 업체가 불명확하거나 Vision이 실패했을 때만 로컬 상단 OCR을 실행한다.
-        if not vision_valid or company not in COMPANY_ORDER:
-            ocr_text = extract_material_fast_ocr(entry["ocr_path"])
-            combined_text = f"{ocr_text} {entry['original_name']}"
-            local_company, local_company_score = detect_company_with_score(combined_text)
-            local_high_score = high_risk_evidence_score(combined_text)
-            local_material_score = material_evidence_score(combined_text, local_company)
-            local_work_type = "high_risk" if local_high_score >= 5 else "material"
-            local_number = extract_sort_number(combined_text)
-
-            if not vision_valid:
-                work_type = local_work_type
-            elif work_type == "material" and local_high_score >= 7:
-                # 상단에서 선정사유/25대 문구가 강하게 잡히면 고위험 누락을 방지한다.
-                work_type = "high_risk"
-
-            if company not in COMPANY_ORDER and local_company_score >= 0.68:
-                company = local_company
-            if number <= 0 and local_number > 0:
-                number = local_number
-            if local_material_score >= 3 and local_high_score < 5 and not vision_valid:
-                work_type = "material"
-
-        # 파일명에 명확한 업체/순번이 있으면 마지막 보조 근거로 사용한다.
-        if company not in COMPANY_ORDER:
-            filename_company = detect_company(entry["original_name"])
-            company = filename_company if filename_company in COMPANY_ORDER else "기타업체"
-        if number <= 0:
-            number = extract_sort_number(entry["original_name"])
-        if work_type not in ("material", "high_risk"):
-            work_type = "material"
-
-        items.append(MaterialWorkItem(
-            image_path=entry["image_path"],
-            original_name=entry["original_name"],
-            upload_index=entry["upload_index"],
-            ocr_text=ocr_text or str(vision.get("evidence", "") or ""),
-            work_type=work_type,
-            company=company,
-            number=max(0, int(number or 0)),
-        ))
-
-        if progress_callback and not api_key:
-            progress_callback(position, total, "빠른 상단 OCR 판독 중")
-
-    return items
 
 def company_order_index(company: str) -> int:
     try:
@@ -2363,45 +1601,6 @@ def fill_date_box(slide):
         )
 
 
-def capture_naver_weather_region():
-    if sync_playwright is None:
-        raise ValueError("playwright가 설치되지 않았습니다.")
-
-    weather_1 = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-    weather_2 = tempfile.NamedTemporaryFile(delete=False, suffix=".png").name
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-
-        context = browser.new_context(
-            viewport=BROWSER_VIEWPORT,
-            locale="ko-KR",
-            device_scale_factor=2,
-        )
-
-        page = context.new_page()
-
-        page.goto(
-            NAVER_WEATHER_URL,
-            wait_until="networkidle",
-            timeout=60000
-        )
-
-        page.wait_for_timeout(3000)
-
-        page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_1['scroll_y']})")
-        page.wait_for_timeout(1000)
-        page.screenshot(path=weather_1, clip=WEATHER_CAPTURE_1["clip"])
-
-        page.evaluate(f"window.scrollTo(0, {WEATHER_CAPTURE_2['scroll_y']})")
-        page.wait_for_timeout(1000)
-        page.screenshot(path=weather_2, clip=WEATHER_CAPTURE_2["clip"])
-
-        browser.close()
-
-    return weather_1, weather_2
-
-
 def delete_extra_slides(prs, keep_slide_count: int):
     for idx in range(len(prs.slides) - 1, keep_slide_count - 1, -1):
         slide = prs.slides[idx]
@@ -2471,23 +1670,12 @@ def build_daily_ppt(
         raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
 
     prs = Presentation(DAILY_TEMPLATE_PPT)
-    temp_extra_paths = []
 
     if len(prs.slides) >= 1:
         fill_date_box(prs.slides[0])
 
-    try:
-        weather_1, weather_2 = capture_naver_weather_region()
-        temp_extra_paths.extend([weather_1, weather_2])
-
-        if len(prs.slides) >= 2:
-            insert_image_to_placeholder(prs.slides[1], WEATHER_BOX_1_TEXT, weather_1)
-
-        if len(prs.slides) >= 3:
-            insert_image_to_placeholder(prs.slides[2], WEATHER_BOX_2_TEXT, weather_2)
-
-    except Exception as e:
-        raise ValueError(f"날씨 캡쳐 실패: {e}")
+    # 네이버 날씨 자동 캡처 기능은 제거됨.
+    # 템플릿의 날씨 관련 슬라이드/영역은 원본 상태 그대로 유지한다.
 
     # 템플릿 기준 슬라이드 찾기
     bad_template_idx = find_slide_index_by_text(prs, DAILY_PHOTO_BOX_TEXT)
@@ -2547,12 +1735,6 @@ def build_daily_ppt(
     prs.save(out)
     out.seek(0)
 
-    for p in temp_extra_paths:
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
 
     return out
 
@@ -2661,27 +1843,41 @@ def render_daily_safety_meeting():
         key="daily_bad_uploader"
     )
 
-    bad_text_values = []
+    bad_items = []
+    material_items = []
+    temp_paths = []
+
     if bad_files:
         if len(bad_files) > MAX_DAILY_FILES_SOFT_WARN:
             st.warning(f"부적합사진이 {len(bad_files)}장입니다. 자동 축소 처리하지만 생성 시간이 길어질 수 있습니다.")
-        with st.expander(f"부적합사진 문구 입력 ({len(bad_files)}장)", expanded=False):
-            for idx, uploaded in enumerate(bad_files):
+        st.markdown("#### 부적합사진")
+
+        for idx, f in enumerate(bad_files):
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getbuffer())
+                original_path = tmp.name
+                temp_paths.append(original_path)
+
+            jpg_path = convert_to_jpg(original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
+            temp_paths.append(jpg_path)
+
+            with st.expander(f"부적합사진 #{idx + 1}", expanded=True):
                 c1, c2 = st.columns([1, 4])
+
                 with c1:
-                    try:
-                        st.image(uploaded, width=110)
-                    except Exception:
-                        st.caption(uploaded.name)
+                    st.image(jpg_path, width=130)
+
                 with c2:
-                    bad_text_values.append(st.text_input(
-                        f"{idx + 1}번 문구",
+                    text_value = st.text_input(
+                        "문구 입력",
                         value="",
                         placeholder="예: 자재 반입 확인",
-                        key=f"daily_bad_text_{idx}",
-                    ))
-    else:
-        bad_text_values = []
+                        key=f"daily_bad_text_{idx}"
+                    )
+
+            bad_items.append(DailySlideData(jpg_path, text_value, get_image_orientation(jpg_path)))
 
     material_files = st.file_uploader(
         "자재입고 및 고위험작업",
@@ -2691,169 +1887,79 @@ def render_daily_safety_meeting():
     )
 
     if material_files:
-        st.caption(
-            f"{len(material_files)}장 선택됨 · 업로드만으로는 인식하지 않고, 아래 생성 버튼을 누른 뒤 한꺼번에 판독합니다."
-        )
-        with st.expander("선택된 사진 보기", expanded=False):
-            for idx, uploaded in enumerate(material_files, start=1):
-                st.caption(f"{idx}. {uploaded.name} · {format_size(len(uploaded.getvalue()))}")
+        if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
+            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. OCR 때문에 시간이 오래 걸릴 수 있습니다.")
+        st.markdown("#### 자재입고 및 고위험작업")
 
-    # 핵심: 버튼을 OCR보다 먼저 그린다. 사진 선택 직후에도 버튼이 즉시 보이고 눌린다.
-    create_clicked = st.button(
-        "일일안전회의 PPT 생성",
-        key="daily_create_btn",
-        type="primary",
-        use_container_width=True,
-        disabled=not bool(bad_files or material_files),
-    )
+        for idx, f in enumerate(material_files):
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
 
-    if create_clicked:
-        temp_paths = []
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(f.getbuffer())
+                material_original_path = tmp.name
+                temp_paths.append(material_original_path)
+
+            material_jpg_path = convert_to_jpg(material_original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
+            temp_paths.append(material_jpg_path)
+
+            item = classify_material_work_image(
+                material_jpg_path,
+                original_name=f.name,
+                upload_index=idx,
+                ocr_image_path=material_original_path
+            )
+            material_items.append(item)
+
+            c1, c2 = st.columns([1, 4])
+            with c1:
+                st.image(material_jpg_path, width=130)
+            with c2:
+                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
+                st.caption(f"{idx + 1}번 / {kind_label} / {item.company} / 번호 {item.number}")
+                st.caption(f.name)
+                # OCR 원문/실패 문구는 화면에 표시하지 않음.
+
+    if material_items:
+        sorted_preview = sort_material_work_items(material_items)
+        with st.expander("자재입고 및 고위험작업 정렬 결과", expanded=False):
+            for order_idx, item in enumerate(sorted_preview, start=1):
+                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
+                st.caption(
+                    f"{order_idx}. {kind_label} / {item.company} / 번호 {item.number} / {item.original_name}"
+                )
+
+    if st.button("일일안전회의 PPT 생성", key="daily_create_btn"):
         try:
-            st.session_state.pop("daily_generated_ppt_bytes", None)
-            st.session_state.pop("daily_generated_ppt_name", None)
+            with st.spinner("PPT 생성 중..."):
+                sorted_material_items = sort_material_work_items(material_items)
+                ppt = build_daily_ppt(bad_items, sorted_material_items)
 
-            total_material = len(material_files or [])
-            progress_bar = st.progress(0)
-            status_box = st.empty()
+            save_generated_ppt_to_bad_photo_storage(ppt, DAILY_OUTPUT_PPT_NAME)
 
-            bad_items = []
-            material_entries = []
-
-            status_box.info("업로드 사진 준비 중...")
-            for idx, uploaded in enumerate(bad_files or []):
-                suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
-                    temp.write(uploaded.getvalue())
-                    original_path = temp.name
-                temp_paths.append(original_path)
-
-                jpg_path = convert_to_jpg(
-                    original_path,
-                    max_size=DAILY_IMAGE_MAX_SIZE,
-                    quality=DAILY_IMAGE_QUALITY,
-                )
-                temp_paths.append(jpg_path)
-                text_value = bad_text_values[idx] if idx < len(bad_text_values) else ""
-                bad_items.append(DailySlideData(
-                    jpg_path,
-                    text_value,
-                    get_image_orientation(jpg_path),
-                ))
-
-            st.session_state.setdefault("daily_material_analysis_cache", {})
-            cache = st.session_state["daily_material_analysis_cache"]
-            cached_items = []
-            uncached_entries = []
-
-            for idx, uploaded in enumerate(material_files or []):
-                suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
-                file_bytes = uploaded.getvalue()
-                file_digest = hashlib.sha256(file_bytes).hexdigest()
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
-                    temp.write(file_bytes)
-                    original_path = temp.name
-                temp_paths.append(original_path)
-
-                jpg_path = convert_to_jpg(
-                    original_path,
-                    max_size=DAILY_IMAGE_MAX_SIZE,
-                    quality=DAILY_IMAGE_QUALITY,
-                )
-                temp_paths.append(jpg_path)
-
-                cached = cache.get(file_digest)
-                if cached:
-                    cached_items.append(MaterialWorkItem(
-                        image_path=jpg_path,
-                        original_name=uploaded.name,
-                        upload_index=idx,
-                        ocr_text=cached.get("ocr_text", ""),
-                        work_type=cached.get("work_type", "material"),
-                        company=cached.get("company", "기타업체"),
-                        number=int(cached.get("number", 0) or 0),
-                    ))
-                else:
-                    uncached_entries.append({
-                        "image_path": jpg_path,
-                        "ocr_path": original_path,
-                        "original_name": uploaded.name,
-                        "upload_index": idx,
-                        "file_digest": file_digest,
-                    })
-
-                if total_material:
-                    progress_bar.progress(min(18, int(((idx + 1) / total_material) * 18)))
-
-            new_items = []
-            if uncached_entries:
-                status_box.info("자재입고·25대 고위험 상단 제목과 업체명을 판독 중...")
-
-                def update_analysis_progress(done, total, message):
-                    ratio = done / max(1, total)
-                    progress_bar.progress(min(72, 18 + int(ratio * 54)))
-                    status_box.info(f"{message} · {done}/{total}장")
-
-                new_items = classify_material_work_images_fast(
-                    uncached_entries,
-                    api_key=st.secrets.get("GPT_API_KEY", ""),
-                    progress_callback=update_analysis_progress,
-                )
-
-                digest_by_index = {entry["upload_index"]: entry["file_digest"] for entry in uncached_entries}
-                for item in new_items:
-                    digest = digest_by_index.get(item.upload_index)
-                    if digest:
-                        cache[digest] = {
-                            "ocr_text": item.ocr_text,
-                            "work_type": item.work_type,
-                            "company": item.company,
-                            "number": item.number,
-                        }
-
-            material_items = sorted(cached_items + new_items, key=lambda item: item.upload_index)
-            sorted_material_items = sort_material_work_items(material_items)
-
-            progress_bar.progress(78)
-            status_box.info("슬라이드 순서 정리 및 PPT 생성 중...")
-            ppt = build_daily_ppt(bad_items, sorted_material_items)
-            ppt_bytes = ppt.getvalue()
-            st.session_state["daily_generated_ppt_bytes"] = ppt_bytes
-            st.session_state["daily_generated_ppt_name"] = DAILY_OUTPUT_PPT_NAME
-
-            save_generated_ppt_to_bad_photo_storage(io.BytesIO(ppt_bytes), DAILY_OUTPUT_PPT_NAME)
-            progress_bar.progress(100)
-            status_box.success(
-                f"완료 · 자재입고 {sum(1 for item in sorted_material_items if item.work_type == 'material')}장 / "
-                f"25대 고위험 {sum(1 for item in sorted_material_items if item.work_type == 'high_risk')}장"
+            st.success("완료!")
+            st.download_button(
+                "일일안전회의 PPT 다운로드",
+                ppt,
+                file_name=DAILY_OUTPUT_PPT_NAME,
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                key="daily_download_btn"
             )
 
-        except Exception as error:
-            st.error(f"오류 발생: {error}")
+        except Exception as e:
+            st.error(f"오류 발생: {e}")
+
         finally:
-            for path in temp_paths:
-                if path and os.path.exists(path):
+            for p in temp_paths:
+                if os.path.exists(p):
                     try:
-                        os.remove(path)
+                        os.remove(p)
                     except Exception:
                         pass
-
-    # 생성 결과를 session_state에 보관해 Streamlit 재실행 후에도 다운로드 버튼이 사라지지 않게 한다.
-    generated = st.session_state.get("daily_generated_ppt_bytes")
-    if generated:
-        st.download_button(
-            "일일안전회의 PPT 다운로드",
-            data=generated,
-            file_name=st.session_state.get("daily_generated_ppt_name", DAILY_OUTPUT_PPT_NAME),
-            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            key="daily_download_btn",
-            use_container_width=True,
-        )
 
     st.markdown("---")
     render_bad_photo_storage()
     st.markdown("---")
+
 
 def load_shared_notice() -> str:
     try:
@@ -2961,13 +2067,12 @@ def render_shared_notice_board():
 #     (표를 보고 어림잡지 않음 — 실측된 기온·습도로부터 결정적으로 계산되는 값이라 지어내는 것이 아님)
 #   - 측정값 판독 공백은 같은 장소·날짜의 정상값 평균으로 자동 보완하고 비고란에 표시
 #     (같은 장소 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용)
-#   - 같은 장소 후보가 여러 건이면 2시간 이내에서 2시간에 가장 가까운 간격을 우선 선택
-#   - 같은 측정구역은 측정자 1명 원칙으로 정상 인식 이름을 나머지 기록에 자동 적용
+#   - 측정이 2시간 넘게 비면 비고란에 "간격초과" 메모를 함께 남김
 #   - 사진을 올리면 즉시(버튼 클릭 없이) 자동 저장 → 페이지를 나가도 작업이 유실되지 않음
 #     이후 확인해서 값이 틀렸으면 "수정 반영"으로 같은 칸을 덮어씀 (중복 저장 안 됨)
 
 HEAT_TEMPLATE_XLSX = os.path.join(BASE_DIR, "templates", "heat_index_template.xlsx")
-HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")  # 호환용: 새 버전에서는 생성/사용하지 않음
+HEAT_LOG_FILE = os.path.join(BASE_DIR, "heat_index_log.xlsx")
 HEAT_UPLOAD_HISTORY_FILE = os.path.join(BASE_DIR, "heat_upload_history.json")
 HEAT_EXPORT_HISTORY_DIR = os.path.join(BASE_DIR, "heat_export_history")
 HEAT_LOG_GAP_MINUTES = 120
@@ -3057,205 +2162,145 @@ def _heat_rect_iou(a, b) -> float:
     return inter / max(1, area_a + area_b - inter)
 
 
-def _order_heat_quad_points(points):
-    """OpenCV 사각형 꼭짓점을 좌상·우상·우하·좌하 순서로 정렬."""
-    pts = np.asarray(points, dtype="float32").reshape(4, 2)
-    sums = pts.sum(axis=1)
-    diffs = np.diff(pts, axis=1).reshape(-1)
-    return np.array([
-        pts[np.argmin(sums)],
-        pts[np.argmin(diffs)],
-        pts[np.argmax(sums)],
-        pts[np.argmax(diffs)],
-    ], dtype="float32")
+def detect_heat_lcd_candidate_crops(img: Image.Image, max_candidates: int = 3) -> List[Image.Image]:
+    """사진에서 LCD로 보이는 고대비 직사각형 영역을 자동 탐색해 확대용 크롭을 반환."""
+    if img.mode != "RGB":
+        img = img.convert("RGB")
 
-
-def _perspective_heat_crop(image_bgr, points):
-    ordered = _order_heat_quad_points(points)
-    tl, tr, br, bl = ordered
-    width = int(max(np.linalg.norm(br - bl), np.linalg.norm(tr - tl)))
-    height = int(max(np.linalg.norm(tr - br), np.linalg.norm(tl - bl)))
-    if width < 50 or height < 35:
-        return None
-    destination = np.array(
-        [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
-        dtype="float32",
-    )
-    matrix = cv2.getPerspectiveTransform(ordered, destination)
-    return cv2.warpPerspective(image_bgr, matrix, (width, height))
-
-
-def _fallback_heat_lcd_crops(img: Image.Image, max_candidates: int = 2) -> List[Image.Image]:
-    """OpenCV를 사용할 수 없을 때 기존 방식으로 LCD 후보를 찾음."""
     original_w, original_h = img.size
+    if original_w < 80 or original_h < 80:
+        return []
+
     preview = img.copy()
     preview.thumbnail((720, 720), Image.LANCZOS)
     pw, ph = preview.size
+
     gray = ImageOps.autocontrast(preview.convert("L"), cutoff=1)
     edges = ImageOps.autocontrast(gray.filter(ImageFilter.FIND_EDGES), cutoff=1)
 
     candidates = []
-    for width_ratio in (0.18, 0.24, 0.31, 0.40):
+    for width_ratio in (0.14, 0.19, 0.25, 0.33, 0.43):
         win_w = max(70, int(pw * width_ratio))
-        for aspect in (0.9, 1.2, 1.55, 1.9):
-            win_h = max(50, int(win_w / aspect))
+        for aspect in (0.9, 1.15, 1.45, 1.8):
+            win_h = max(55, int(win_w / aspect))
             if win_w >= pw or win_h >= ph:
                 continue
-            step = max(24, int(min(win_w, win_h) * 0.45))
-            for y1 in range(0, max(1, ph - win_h + 1), step):
-                for x1 in range(0, max(1, pw - win_w + 1), step):
+
+            step = max(26, int(min(win_w, win_h) * 0.42))
+            y_positions = list(range(0, max(1, ph - win_h + 1), step))
+            x_positions = list(range(0, max(1, pw - win_w + 1), step))
+            if not y_positions or y_positions[-1] != ph - win_h:
+                y_positions.append(ph - win_h)
+            if not x_positions or x_positions[-1] != pw - win_w:
+                x_positions.append(pw - win_w)
+
+            for y1 in y_positions:
+                for x1 in x_positions:
                     box = (x1, y1, x1 + win_w, y1 + win_h)
-                    edge_mean = ImageStat.Stat(edges.crop(box)).mean[0]
-                    stat = ImageStat.Stat(gray.crop(box))
-                    contrast = stat.stddev[0]
+                    edge_stat = ImageStat.Stat(edges.crop(box))
+                    gray_stat = ImageStat.Stat(gray.crop(box))
+                    edge_mean = edge_stat.mean[0]
+                    contrast = gray_stat.stddev[0]
+                    brightness = gray_stat.mean[0]
+
                     cx = (x1 + win_w / 2) / max(1, pw)
                     cy = (y1 + win_h / 2) / max(1, ph)
-                    center_bonus = max(0.0, 1.0 - (((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5 * 1.5))
-                    candidates.append((edge_mean * 0.7 + contrast * 0.9 + center_bonus * 8.0, box))
+                    center_bonus = max(0.0, 1.0 - ((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5 * 1.4)
+                    brightness_penalty = 8.0 if brightness < 18 or brightness > 242 else 0.0
+                    score = edge_mean * 0.72 + contrast * 0.78 + center_bonus * 7.0 - brightness_penalty
+                    candidates.append((score, box))
 
     selected = []
-    for score, box in sorted(candidates, reverse=True):
-        if any(_heat_rect_iou(box, prev) > 0.35 for _, prev in selected):
+    for score, box in sorted(candidates, key=lambda x: x[0], reverse=True):
+        if any(_heat_rect_iou(box, prev_box) > 0.35 for _, prev_box in selected):
             continue
         selected.append((score, box))
         if len(selected) >= max_candidates:
             break
 
-    sx, sy = original_w / max(1, pw), original_h / max(1, ph)
+    scale_x = original_w / max(1, pw)
+    scale_y = original_h / max(1, ph)
     crops = []
     for _, (x1, y1, x2, y2) in selected:
-        ox1, oy1, ox2, oy2 = int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)
-        px, py = int((ox2 - ox1) * 0.15), int((oy2 - oy1) * 0.18)
-        box = (max(0, ox1 - px), max(0, oy1 - py), min(original_w, ox2 + px), min(original_h, oy2 + py))
-        crops.append(img.crop(box))
+        ox1, oy1 = int(x1 * scale_x), int(y1 * scale_y)
+        ox2, oy2 = int(x2 * scale_x), int(y2 * scale_y)
+        pad_x = int((ox2 - ox1) * 0.18)
+        pad_y = int((oy2 - oy1) * 0.22)
+        ox1, oy1 = max(0, ox1 - pad_x), max(0, oy1 - pad_y)
+        ox2, oy2 = min(original_w, ox2 + pad_x), min(original_h, oy2 + pad_y)
+        if ox2 - ox1 >= 50 and oy2 - oy1 >= 40:
+            crops.append(img.crop((ox1, oy1, ox2, oy2)))
     return crops
 
 
-def detect_heat_lcd_candidate_crops(img: Image.Image, max_candidates: int = 2) -> List[Image.Image]:
-    """OpenCV로 LCD 사각형을 탐색하고 기울기를 펴서 상위 후보만 반환.
-
-    opencv-python-headless가 없으면 PIL 기반 후보 탐색으로 자동 대체된다.
-    """
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-    if cv2 is None or np is None:
-        return _fallback_heat_lcd_crops(img, max_candidates=max_candidates)
-
-    rgb = np.asarray(img)
-    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-    original_h, original_w = bgr.shape[:2]
-    scale = min(1.0, 1200.0 / max(original_w, original_h))
-    work = cv2.resize(bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1.0 else bgr.copy()
-
-    gray = cv2.cvtColor(work, cv2.COLOR_BGR2GRAY)
-    clahe = cv2.createCLAHE(clipLimit=2.2, tileGridSize=(8, 8)).apply(gray)
-    blurred = cv2.GaussianBlur(clahe, (5, 5), 0)
-    edges = cv2.Canny(blurred, 45, 145)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 5))
-    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
-
-    contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    image_area = work.shape[0] * work.shape[1]
-    candidates = []
-
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < image_area * 0.006 or area > image_area * 0.60:
-            continue
-        perimeter = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.035 * perimeter, True)
-        rect = cv2.minAreaRect(contour)
-        rw, rh = rect[1]
-        if rw <= 0 or rh <= 0:
-            continue
-        aspect = max(rw, rh) / max(1.0, min(rw, rh))
-        if not (1.0 <= aspect <= 3.8):
-            continue
-        box_area = rw * rh
-        rectangularity = area / max(1.0, box_area)
-        if rectangularity < 0.42:
-            continue
-
-        if len(approx) == 4:
-            points = approx.reshape(4, 2).astype("float32")
-        else:
-            points = cv2.boxPoints(rect).astype("float32")
-
-        x, y, w, h = cv2.boundingRect(points.astype("int32"))
-        roi = clahe[max(0, y):min(clahe.shape[0], y + h), max(0, x):min(clahe.shape[1], x + w)]
-        if roi.size == 0:
-            continue
-        contrast = float(np.std(roi))
-        edge_density = float(np.mean(edges[max(0, y):min(edges.shape[0], y + h), max(0, x):min(edges.shape[1], x + w)] > 0))
-        cx = (x + w / 2) / max(1, work.shape[1])
-        cy = (y + h / 2) / max(1, work.shape[0])
-        center_bonus = max(0.0, 1.0 - (((cx - 0.5) ** 2 + (cy - 0.48) ** 2) ** 0.5 * 1.5))
-        score = contrast * 0.55 + edge_density * 100 * 0.35 + rectangularity * 18 + center_bonus * 8
-        candidates.append((score, points, (x, y, x + w, y + h)))
-
-    selected = []
-    for score, points, box in sorted(candidates, key=lambda item: item[0], reverse=True):
-        if any(_heat_rect_iou(box, prior_box) > 0.42 for _, _, prior_box in selected):
-            continue
-        selected.append((score, points, box))
-        if len(selected) >= max_candidates:
-            break
-
-    crops = []
-    inv_scale = 1.0 / scale
-    for _, points, _ in selected:
-        original_points = points * inv_scale
-        warped = _perspective_heat_crop(bgr, original_points)
-        if warped is None:
-            continue
-        # LCD 주변 프레임을 조금 남겨 ℃/% 위치까지 같이 판독한다.
-        h, w = warped.shape[:2]
-        pad_x, pad_y = max(4, int(w * 0.04)), max(4, int(h * 0.05))
-        warped = cv2.copyMakeBorder(warped, pad_y, pad_y, pad_x, pad_x, cv2.BORDER_REPLICATE)
-        crop_rgb = cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)
-        crops.append(Image.fromarray(crop_rgb))
-
-    if not crops:
-        return _fallback_heat_lcd_crops(img, max_candidates=max_candidates)
-    return crops[:max_candidates]
-
-
 def make_heat_meter_vision_images(image_path: str) -> List[str]:
-    """재판독용 이미지는 원본 문맥 1장과 가장 좋은 LCD 후보 최대 2장만 사용."""
+    """LCD 자동 탐색 영역과 원본 보정본을 생성해 흐린 실측기 숫자를 재판독."""
     img = Image.open(image_path)
     img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    original = ImageOps.autocontrast(img, cutoff=1)
-    original = ImageEnhance.Sharpness(original).enhance(2.0)
-    variants = [original]
+    variants = [img.copy()]
 
-    for crop in detect_heat_lcd_candidate_crops(img, max_candidates=2):
+    # 전체 사진 강화본: 카카오톡 캡처의 이름·시간·위치 문맥도 유지한다.
+    full_enhanced = ImageOps.autocontrast(img, cutoff=1)
+    full_enhanced = ImageEnhance.Contrast(full_enhanced).enhance(1.40)
+    full_enhanced = ImageEnhance.Sharpness(full_enhanced).enhance(3.0)
+    full_enhanced = full_enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175, threshold=2))
+    variants.append(full_enhanced)
+
+    # 계기가 사진 중앙에 있는 일반적인 경우를 위한 넓은 문맥 확대본.
+    # 자동 후보가 숫자 일부만 잡아도 온도·습도 화면 전체를 함께 확인할 수 있다.
+    w, h = img.size
+    if w >= 100 and h >= 100:
+        context_crop = img.crop((int(w * 0.03), int(h * 0.02), int(w * 0.97), int(h * 0.86)))
+        context_crop = ImageOps.autocontrast(context_crop, cutoff=1)
+        context_crop = ImageEnhance.Contrast(context_crop).enhance(1.42)
+        context_crop = ImageEnhance.Sharpness(context_crop).enhance(3.2)
+        variants.append(context_crop)
+
+    # 사진에서 LCD 가능성이 높은 영역을 자동 탐색해 크게 확대한다.
+    lcd_crops = detect_heat_lcd_candidate_crops(img, max_candidates=2)
+    for crop_index, crop in enumerate(lcd_crops):
         crop = ImageOps.autocontrast(crop, cutoff=1)
         crop = ImageEnhance.Contrast(crop).enhance(1.55)
         crop = ImageEnhance.Sharpness(crop).enhance(3.8)
         crop = crop.filter(ImageFilter.UnsharpMask(radius=2, percent=210, threshold=1))
         variants.append(crop)
 
+        # 최우선 후보는 흑백 세그먼트 강화본도 추가한다.
+        if crop_index == 0:
+            gray = ImageOps.autocontrast(crop.convert("L"), cutoff=1)
+            gray = ImageEnhance.Contrast(gray).enhance(1.85)
+            gray = ImageEnhance.Sharpness(gray).enhance(3.4)
+            variants.append(gray.convert("RGB"))
+
     data_urls = []
     seen_hashes = set()
-    for index, variant in enumerate(variants[:3]):
-        thumb = variant.copy()
-        thumb.thumbnail((160, 160))
-        key_buf = io.BytesIO()
-        thumb.save(key_buf, format="PNG")
-        key = hashlib.sha256(key_buf.getvalue()).hexdigest()
-        if key in seen_hashes:
+    for variant in variants:
+        try:
+            thumb = variant.copy()
+            thumb.thumbnail((160, 160))
+            key_buf = io.BytesIO()
+            thumb.save(key_buf, format="PNG")
+            key = hashlib.sha256(key_buf.getvalue()).hexdigest()
+            if key in seen_hashes:
+                continue
+            seen_hashes.add(key)
+
+            data_urls.append(
+                pil_image_to_data_url(
+                    variant,
+                    max_dim=3000,
+                    min_dim=2200,
+                    quality=95,
+                )
+            )
+        except Exception:
             continue
-        seen_hashes.add(key)
-        data_urls.append(pil_image_to_data_url(
-            variant,
-            max_dim=2800 if index == 0 else 3200,
-            min_dim=1800 if index == 0 else 2400,
-            quality=94,
-        ))
-    return data_urls[:3]
+
+    return data_urls[:6]
+
 
 HEAT_EXTRACT_PROMPT = """이 이미지는 건설현장 체감온도 측정 기록 사진이다. 카카오톡 대화 캡쳐처럼
 서로 다른 위치/시각의 측정 기록이 한 장에 여러 건 섞여 있을 수 있다. 각 기록을 구분해서 각각 하나의
@@ -3317,14 +2362,6 @@ HEAT_METER_RETRY_PROMPT = """여러 입력 이미지는 모두 동일한 원본 
 측정기를 찾지 못하면 []만 출력하라."""
 
 
-HEAT_PRIMARY_MODEL = "gpt-4o-mini"
-HEAT_FALLBACK_MODEL = "gpt-5-mini"
-HEAT_MODEL_PRICING_USD_PER_MILLION = {
-    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
-    "gpt-5-mini": {"input": 0.25, "output": 2.00},
-}
-
-
 def _extract_openai_output_text(data: dict) -> str:
     text = ""
     if data.get("output_text"):
@@ -3344,52 +2381,6 @@ def _safe_confidence(value, default: float = 0.0) -> float:
     return max(0.0, min(1.0, confidence))
 
 
-def _heat_usage_from_response(data: dict, model: str) -> dict:
-    usage = data.get("usage") or {}
-    input_tokens = int(usage.get("input_tokens", 0) or 0)
-    output_tokens = int(usage.get("output_tokens", 0) or 0)
-    price = HEAT_MODEL_PRICING_USD_PER_MILLION.get(model, {"input": 0.0, "output": 0.0})
-    cost = (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000
-    return {
-        "model": model,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": int(usage.get("total_tokens", input_tokens + output_tokens) or (input_tokens + output_tokens)),
-        "cost_usd": round(cost, 8),
-    }
-
-
-def _empty_heat_usage_summary() -> dict:
-    return {"calls": [], "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0}
-
-
-def merge_heat_usage(summary: dict, call_usage: Optional[dict]) -> dict:
-    if summary is None:
-        summary = _empty_heat_usage_summary()
-    if not call_usage:
-        return summary
-    summary.setdefault("calls", []).append(call_usage)
-    for key in ("input_tokens", "output_tokens", "total_tokens"):
-        summary[key] = int(summary.get(key, 0) or 0) + int(call_usage.get(key, 0) or 0)
-    summary["cost_usd"] = round(float(summary.get("cost_usd", 0.0) or 0.0) + float(call_usage.get("cost_usd", 0.0) or 0.0), 8)
-    return summary
-
-
-def call_heat_vision_api(api_key: str, model: str, prompt: str, image_urls: List[str], timeout: int = 80) -> Tuple[str, dict]:
-    content = [{"type": "input_text", "text": prompt}]
-    content.extend({"type": "input_image", "image_url": url} for url in image_urls)
-    response = requests.post(
-        "https://api.openai.com/v1/responses",
-        headers={"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json"},
-        json={"model": model, "input": [{"role": "user", "content": content}]},
-        timeout=timeout,
-    )
-    if response.status_code != 200:
-        raise Exception(f"{model} API Error: {response.text}")
-    data = response.json()
-    return _extract_openai_output_text(data), _heat_usage_from_response(data, model)
-
-
 def parse_heat_meter_retry_response(text: str) -> List[dict]:
     cleaned = str(text or "").replace("```json", "").replace("```", "").strip()
     try:
@@ -3398,39 +2389,51 @@ def parse_heat_meter_retry_response(text: str) -> List[dict]:
         cleaned = re.sub(r"[\x00-\x1F]+", " ", cleaned)
         match = re.search(r"\[.*\]", cleaned, re.S)
         parsed = json.loads(match.group(0)) if match else []
+
     if not isinstance(parsed, list):
         parsed = [parsed]
-    return [{
-        "기온": str(item.get("기온", "") or "").strip(),
-        "습도": str(item.get("습도", "") or "").strip(),
-        "기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
-        "습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
-    } for item in parsed if isinstance(item, dict)]
+
+    results = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        results.append({
+            "기온": str(item.get("기온", "") or "").strip(),
+            "습도": str(item.get("습도", "") or "").strip(),
+            "기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
+            "습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
+        })
+    return results
 
 
-def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> Tuple[List[dict], dict]:
-    """불확실한 사진만 GPT-5 mini와 상위 LCD 후보로 재판독."""
+def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> List[dict]:
+    """흐리거나 작은 실제 측정기 LCD를 확대·보정 이미지로 한 번 더 판독."""
     image_urls = make_heat_meter_vision_images(image_path)
     if not image_urls:
-        return [], _empty_heat_usage_summary()
+        return []
 
-    usage = _empty_heat_usage_summary()
-    try:
-        text, call_usage = call_heat_vision_api(
-            api_key, HEAT_FALLBACK_MODEL, HEAT_METER_RETRY_PROMPT, image_urls, timeout=90
-        )
-        merge_heat_usage(usage, call_usage)
-        return parse_heat_meter_retry_response(text), usage
-    except Exception:
-        # 계정/지역에서 GPT-5 mini 사용이 막힌 경우 기능 중단 대신 기존 모델로 1회 대체.
-        try:
-            text, call_usage = call_heat_vision_api(
-                api_key, HEAT_PRIMARY_MODEL, HEAT_METER_RETRY_PROMPT, image_urls, timeout=80
-            )
-            merge_heat_usage(usage, call_usage)
-            return parse_heat_meter_retry_response(text), usage
-        except Exception:
-            return [], usage
+    content = [{"type": "input_text", "text": HEAT_METER_RETRY_PROMPT}]
+    content.extend({"type": "input_image", "image_url": url} for url in image_urls)
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "input": [{"role": "user", "content": content}],
+    }
+
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=75,
+    )
+    if response.status_code != 200:
+        return []
+
+    return parse_heat_meter_retry_response(_extract_openai_output_text(response.json()))
 
 
 def heat_record_needs_meter_retry(record: dict) -> bool:
@@ -3438,73 +2441,135 @@ def heat_record_needs_meter_retry(record: dict) -> bool:
     humidity = parse_heat_number(record.get("습도"), "습도")
     temp_conf = _safe_confidence(record.get("_기온확신도"), 0.0)
     hum_conf = _safe_confidence(record.get("_습도확신도"), 0.0)
-    return temp is None or humidity is None or temp_conf < 0.82 or hum_conf < 0.82
+
+    if temp is None or humidity is None:
+        return True
+    if temp_conf < 0.82 or hum_conf < 0.82:
+        return True
+    return False
 
 
 def _replace_meter_field(record: dict, retry: dict, field: str, direct_photo: bool = False):
     confidence_key = f"_{field}확신도"
     retry_confidence_key = f"{field}확신도"
+
     old_value = parse_heat_number(record.get(field), field)
     new_value = parse_heat_number(retry.get(field), field)
     if new_value is None:
         return
+
     old_conf = _safe_confidence(record.get(confidence_key), 0.0)
     new_conf = _safe_confidence(retry.get(retry_confidence_key), 0.0)
-    if old_value is None or (old_conf < 0.82 and new_conf >= old_conf) or (direct_photo and new_conf >= 0.90 and new_conf > old_conf):
+
+    should_replace = False
+    if old_value is None:
+        should_replace = True
+    elif old_conf < 0.82 and new_conf >= old_conf:
+        should_replace = True
+    elif direct_photo and new_conf >= 0.90 and new_conf > old_conf:
+        # 측정기 단독 사진은 재판독 결과가 더 확실하면 기존 값도 교정한다.
+        should_replace = True
+
+    if should_replace:
         record[field] = str(int(new_value)) if field == "습도" and new_value.is_integer() else str(new_value)
         record[confidence_key] = new_conf
         record["_meter_retry_used"] = True
 
 
 def merge_heat_meter_retry(records: List[dict], retry_values: List[dict]) -> List[dict]:
+    """1차 구조화 결과에 LCD 전용 재판독값을 안전하게 합침."""
     if not retry_values:
         return records
+
+    # 온습도계 사진만 단독으로 올린 경우에도 기록 1건을 생성한다.
     if not records:
         return [{
-            "측정자": "", "측정위치": "", "측정일자": "", "측정시간": "",
-            "기온": item.get("기온", ""), "습도": item.get("습도", ""), "체감온도": "",
+            "측정자": "",
+            "측정위치": "",
+            "측정일자": "",
+            "측정시간": "",
+            "기온": item.get("기온", ""),
+            "습도": item.get("습도", ""),
+            "체감온도": "",
             "_기온확신도": _safe_confidence(item.get("기온확신도"), 0.0),
             "_습도확신도": _safe_confidence(item.get("습도확신도"), 0.0),
             "_meter_retry_used": True,
         } for item in retry_values]
 
-    direct_photo = len(records) == 1 and not any(records[0].get(k) for k in ("측정자", "측정위치", "측정일자", "측정시간"))
+    direct_photo = (
+        len(records) == 1
+        and not records[0].get("측정자")
+        and not records[0].get("측정위치")
+        and not records[0].get("측정일자")
+        and not records[0].get("측정시간")
+    )
+
     if len(records) == len(retry_values):
-        pairs = zip(range(len(records)), retry_values)
+        pairs = list(zip(range(len(records)), retry_values))
     else:
-        retry_indexes = [idx for idx, record in enumerate(records) if heat_record_needs_meter_retry(record)]
-        pairs = zip(retry_indexes, retry_values)
+        retry_indexes = [
+            idx for idx, record in enumerate(records)
+            if heat_record_needs_meter_retry(record)
+        ]
+        pairs = list(zip(retry_indexes, retry_values))
 
     for record_index, retry in pairs:
         record = records[record_index]
         _replace_meter_field(record, retry, "기온", direct_photo=direct_photo)
         _replace_meter_field(record, retry, "습도", direct_photo=direct_photo)
+
+        # 기온 또는 습도가 재판독으로 바뀌었다면 기존 체감온도는 공식으로 다시 산출하도록 비운다.
         if record.get("_meter_retry_used"):
             record["체감온도"] = ""
+
     return records
 
 
-def extract_heat_records_with_gpt(api_key: str, image_path: str) -> Tuple[List[dict], dict]:
-    """1차는 저비용 모델 1회, 불확실한 사진만 상위 모델 1회 재판독."""
-    usage = _empty_heat_usage_summary()
-    text, call_usage = call_heat_vision_api(
-        api_key,
-        HEAT_PRIMARY_MODEL,
-        HEAT_EXTRACT_PROMPT,
-        [image_to_data_url(image_path)],
-        timeout=70,
-    )
-    merge_heat_usage(usage, call_usage)
-    records = parse_heat_gpt_response(text)
+def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
+    """사진 1장에서 기록을 추출하고, 흐린 LCD는 확대·보정 후 자동 재판독."""
+    url = "https://api.openai.com/v1/responses"
+    data_url = image_to_data_url(image_path)
 
-    direct_photo = len(records) == 1 and not any(records[0].get(k) for k in ("측정자", "측정위치", "측정일자", "측정시간"))
-    needs_retry = not records or any(heat_record_needs_meter_retry(record) for record in records) or direct_photo
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": HEAT_EXTRACT_PROMPT},
+                    {"type": "input_image", "image_url": data_url},
+                ],
+            }
+        ],
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=60)
+    if response.status_code != 200:
+        raise Exception(f"API Error: {response.text}")
+
+    records = parse_heat_gpt_response(_extract_openai_output_text(response.json()))
+
+    # 값이 비거나 확신도가 낮은 경우에만 LCD 전용 2차 판독을 실행한다.
+    # 온습도계 단독 사진도 실제 LCD 값을 재확인한다.
+    direct_photo = (
+        len(records) == 1
+        and not records[0].get("측정자")
+        and not records[0].get("측정위치")
+        and not records[0].get("측정일자")
+        and not records[0].get("측정시간")
+    )
+    needs_retry = not records or any(heat_record_needs_meter_retry(r) for r in records) or direct_photo
+
     if needs_retry:
-        retry_values, retry_usage = extract_heat_meter_values_with_gpt(api_key, image_path)
-        for call in retry_usage.get("calls", []):
-            merge_heat_usage(usage, call)
+        retry_values = extract_heat_meter_values_with_gpt(api_key, image_path)
         records = merge_heat_meter_retry(records, retry_values)
-    return records, usage
+
+    return records
+
 
 def parse_heat_gpt_response(text: str) -> List[dict]:
     """GPT 응답 텍스트를 JSON 배열로 파싱 (코드블록/잡텍스트 방어)."""
@@ -3597,19 +2662,13 @@ def get_or_create_heat_sheet(wb, template_ws, location: str, date_str: str):
 
     loc_norm = normalize_for_match(location)
     best_name, best_score = None, 0.0
-    target_numbers = re.findall(r"\d+", loc_norm)
     for name, prefix in candidates:
-        prefix_norm = normalize_for_match(prefix)
-        prefix_numbers = re.findall(r"\d+", prefix_norm)
-        # 101동과 102동처럼 숫자가 다른 장소는 문자열이 비슷해도 절대 병합하지 않는다.
-        if target_numbers and prefix_numbers and target_numbers != prefix_numbers:
-            continue
-        score = SequenceMatcher(None, prefix_norm, loc_norm).ratio()
+        score = SequenceMatcher(None, normalize_for_match(prefix), loc_norm).ratio()
         if score > best_score:
             best_score = score
             best_name = name
 
-    if best_name and best_score >= 0.86:
+    if best_score >= 0.75:
         return wb[best_name]
 
     safe_loc = re.sub(r'[\\/*?:\[\]]', "_", location).strip()[:20] or "미지정"
@@ -3723,281 +2782,6 @@ def format_measurer(name: str) -> str:
     return f"{matched} 대원" if matched else ""
 
 
-def _measurer_similarity_scores(raw_name: str) -> list:
-    """불완전한 OCR 이름을 지정된 11명과 비교한 점수 목록."""
-    compact = re.sub(r"[^가-힣]", "", str(raw_name or ""))
-    for suffix in HEAT_MEASURER_SUFFIXES:
-        suffix_compact = re.sub(r"[^가-힣]", "", suffix)
-        if compact.endswith(suffix_compact):
-            compact = compact[:-len(suffix_compact)]
-            break
-    if not compact:
-        return []
-    return sorted(((SequenceMatcher(None, compact, allowed).ratio(), allowed)
-                   for allowed in HEAT_ALLOWED_MEASURERS), reverse=True)
-
-
-def infer_measurer_per_location(records: List[dict]) -> List[dict]:
-    """같은 측정구역·날짜는 측정자 1명이라는 원칙으로 이름을 보완."""
-    grouped = {}
-    for rec in records:
-        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
-        grouped.setdefault(key, []).append(rec)
-
-    for group in grouped.values():
-        confident = []
-        for rec in group:
-            matched = match_allowed_measurer(rec.get("_raw_measurer", rec.get("측정자", "")))
-            if matched:
-                confident.append(matched)
-
-        selected = ""
-        if confident:
-            counts = {name: confident.count(name) for name in set(confident)}
-            selected = max(counts, key=lambda name: (counts[name], -HEAT_ALLOWED_MEASURERS.index(name)))
-        else:
-            aggregate = {name: 0.0 for name in HEAT_ALLOWED_MEASURERS}
-            evidence = 0
-            for rec in group:
-                scores = _measurer_similarity_scores(rec.get("_raw_measurer", ""))
-                if not scores:
-                    continue
-                evidence += 1
-                for score, name in scores:
-                    aggregate[name] += score
-            if evidence:
-                ranked = sorted(((score / evidence, name) for name, score in aggregate.items()), reverse=True)
-                best_score, best_name = ranked[0]
-                second_score = ranked[1][0] if len(ranked) > 1 else 0.0
-                if best_score >= 0.55 and best_score - second_score >= 0.04:
-                    selected = best_name
-
-        if selected:
-            formatted = f"{selected} 대원"
-            for rec in group:
-                was_recognized = bool(match_allowed_measurer(rec.get("_raw_measurer", "")))
-                rec["측정자"] = formatted
-                rec["_measurer_unrecognized"] = False
-                rec["_measurer_inferred"] = not was_recognized
-    return records
-
-
-def optimize_records_near_two_hours(records: List[dict]) -> List[dict]:
-    """같은 장소·날짜 후보 중 120분 이내에서 가장 120분에 가까운 기록을 선택."""
-    grouped = {}
-    for rec in records:
-        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
-        grouped.setdefault(key, []).append(rec)
-
-    optimized = []
-    for group in grouped.values():
-        timed, untimed = [], []
-        for rec in group:
-            mins = heat_time_to_minutes(rec.get("측정시간"))
-            if mins is None:
-                untimed.append(rec)
-            else:
-                timed.append((mins, rec))
-        timed.sort(key=lambda item: item[0])
-        if not timed:
-            optimized.extend(untimed)
-            continue
-
-        selected = [timed[0]]
-        cursor = 1
-        while cursor < len(timed):
-            last_min = selected[-1][0]
-            candidates = []
-            j = cursor
-            while j < len(timed) and timed[j][0] - last_min <= HEAT_LOG_GAP_MINUTES:
-                if timed[j][0] > last_min:
-                    candidates.append((j, timed[j]))
-                j += 1
-            if candidates:
-                chosen_index, chosen = candidates[-1]
-                selected.append(chosen)
-                cursor = chosen_index + 1
-            else:
-                selected.append(timed[cursor])
-                cursor += 1
-
-        optimized.extend(rec for _, rec in selected)
-        optimized.extend(untimed)
-
-    optimized.sort(key=lambda rec: (str(rec.get("측정일자", "")),
-                                    normalize_for_match(rec.get("측정위치", "")),
-                                    heat_time_to_minutes(rec.get("측정시간")) if heat_time_to_minutes(rec.get("측정시간")) is not None else 10**9))
-    return optimized
-
-
-
-HEAT_MAIN_SLOT_MINUTES = [9 * 60, 11 * 60, 13 * 60, 15 * 60, 17 * 60]
-
-
-def _stable_slot_jitters(group_key: tuple) -> List[int]:
-    """09·11·13·15·17시 주변의 자연스러운 분 단위를 만들되 간격은 120분을 넘지 않게 한다."""
-    seed_text = "|".join(str(v or "") for v in group_key)
-    seed = int(hashlib.sha256(seed_text.encode("utf-8")).hexdigest()[:8], 16)
-    # 첫 시간의 분 편차를 정하고, 이후에는 116~120분 간격으로 진행한다.
-    first_jitter = (seed % 11) - 5  # -5~+5분
-    gaps = [116 + ((seed >> (i * 3)) % 5) for i in range(4)]  # 116~120분
-    times = [HEAT_MAIN_SLOT_MINUTES[0] + first_jitter]
-    for gap in gaps:
-        times.append(times[-1] + gap)
-    return times
-
-
-def _minutes_to_hhmm(minutes: int) -> str:
-    minutes = max(0, min(23 * 60 + 59, int(minutes)))
-    return f"{minutes // 60:02d}:{minutes % 60:02d}"
-
-
-def _interpolate_heat_field(slot_index: int, slot_records: dict, field: str) -> Optional[float]:
-    """주변 실제 측정값을 선형 보간하고, 한쪽만 있으면 가장 가까운 값을 사용한다."""
-    known = []
-    for idx, rec in slot_records.items():
-        value = parse_heat_number(rec.get(field), field)
-        if value is not None:
-            known.append((idx, value))
-    if not known:
-        return None
-    known.sort()
-    for idx, value in known:
-        if idx == slot_index:
-            return round_heat_average(value)
-    left = [(idx, value) for idx, value in known if idx < slot_index]
-    right = [(idx, value) for idx, value in known if idx > slot_index]
-    if left and right:
-        li, lv = left[-1]
-        ri, rv = right[0]
-        ratio = (slot_index - li) / max(1, (ri - li))
-        return round_heat_average(lv + (rv - lv) * ratio)
-    if left:
-        return round_heat_average(left[-1][1])
-    return round_heat_average(right[0][1])
-
-
-def _stable_heat_variation(key, slot_index: int, field: str) -> float:
-    """같은 자료를 다시 생성해도 값이 바뀌지 않는 소폭 보정값을 만든다."""
-    seed_text = f"{key}|{slot_index}|{field}"
-    digest = hashlib.sha256(seed_text.encode("utf-8")).digest()
-    n = int.from_bytes(digest[:4], "big")
-    if field == "기온":
-        choices = (-0.3, -0.2, -0.1, 0.1, 0.2, 0.3)
-    elif field == "습도":
-        choices = (-4, -3, -2, -1, 1, 2, 3, 4)
-    else:
-        choices = (-0.4, -0.3, -0.2, -0.1, 0.1, 0.2, 0.3, 0.4)
-    return float(choices[n % len(choices)])
-
-
-def _naturalize_generated_heat_values(rec: dict, key, slot_index: int) -> None:
-    """자동 보완된 행만 실제 측정처럼 소폭 변동시키고 체감온도를 다시 계산한다."""
-    if not rec.get("_auto_generated_slot"):
-        return
-
-    temp = parse_heat_number(rec.get("기온"), "기온")
-    humidity = parse_heat_number(rec.get("습도"), "습도")
-
-    if temp is not None:
-        temp = round(max(10.0, min(40.0, temp + _stable_heat_variation(key, slot_index, "기온"))), 1)
-        rec["기온"] = str(temp)
-
-    if humidity is not None:
-        humidity = int(round(max(20.0, min(100.0, humidity + _stable_heat_variation(key, slot_index, "습도")))))
-        rec["습도"] = str(humidity)
-
-    if temp is not None and humidity is not None:
-        heat = calc_heat_index(temp, humidity)
-        heat = round(max(10.0, min(60.0, heat + _stable_heat_variation(key, slot_index, "체감온도"))), 1)
-        rec["체감온도"] = str(heat)
-        rec["_heat_index_calculated"] = True
-
-
-def complete_five_daily_measurements(records: List[dict]) -> List[dict]:
-    """각 측정구역·날짜마다 09·11·13·15·17시 전후의 5개 기록을 완성한다.
-
-    실제 기록은 가장 가까운 메인 시간대에 우선 배정하고, 빈 시간대는 앞뒤 값 보간으로 채운다.
-    생성 시간은 메인 시간과 유사하며 연속 측정 간격은 120분 이내로 유지한다.
-    """
-    grouped = {}
-    for rec in records:
-        key = (normalize_for_match(rec.get("측정위치", "")), str(rec.get("측정일자", "") or ""))
-        grouped.setdefault(key, []).append(rec)
-
-    completed = []
-    for key, group in grouped.items():
-        # 실제 기록을 가장 가까운 메인 슬롯에 1건씩 배정한다.
-        candidates = []
-        for rec in group:
-            mins = heat_time_to_minutes(rec.get("측정시간"))
-            if mins is None:
-                continue
-            nearest_idx = min(range(5), key=lambda i: abs(mins - HEAT_MAIN_SLOT_MINUTES[i]))
-            distance = abs(mins - HEAT_MAIN_SLOT_MINUTES[nearest_idx])
-            candidates.append((distance, mins, nearest_idx, rec))
-        candidates.sort(key=lambda item: (item[0], item[1]))
-
-        slot_records = {}
-        used_ids = set()
-        for _, _, slot_idx, rec in candidates:
-            if slot_idx not in slot_records:
-                slot_records[slot_idx] = rec
-                used_ids.add(id(rec))
-
-        # 시간 없는 기록은 남은 슬롯에 순서대로 활용한다.
-        untimed = [rec for rec in group if id(rec) not in used_ids and heat_time_to_minutes(rec.get("측정시간")) is None]
-        for slot_idx in range(5):
-            if slot_idx not in slot_records and untimed:
-                slot_records[slot_idx] = untimed.pop(0)
-
-        generated_times = _stable_slot_jitters(key)
-        template_rec = next(iter(slot_records.values()), group[0])
-        group_person = format_measurer(template_rec.get("측정자", ""))
-
-        for slot_idx in range(5):
-            if slot_idx in slot_records:
-                rec = dict(slot_records[slot_idx])
-                actual_mins = heat_time_to_minutes(rec.get("측정시간"))
-                normalized_time = _minutes_to_hhmm(generated_times[slot_idx])
-                if actual_mins != generated_times[slot_idx]:
-                    rec["_time_slot_adjusted"] = True
-                # 시간은 09·11·13·15·17시 부근으로 통일하여 간격을 116~120분으로 유지한다.
-                rec["측정시간"] = normalized_time
-            else:
-                rec = dict(template_rec)
-                rec["측정시간"] = _minutes_to_hhmm(generated_times[slot_idx])
-                rec["_auto_generated_slot"] = True
-                rec["_source_index"] = f"auto_{slot_idx}"
-
-                for field in ("기온", "습도"):
-                    value = _interpolate_heat_field(slot_idx, slot_records, field)
-                    if value is not None:
-                        rec[field] = str(value)
-                        rec.setdefault("_average_filled", []).append(field)
-                temp = parse_heat_number(rec.get("기온"), "기온")
-                humidity = parse_heat_number(rec.get("습도"), "습도")
-                if temp is not None and humidity is not None:
-                    rec["체감온도"] = str(calc_heat_index(temp, humidity))
-                    rec["_heat_index_calculated"] = True
-                else:
-                    value = _interpolate_heat_field(slot_idx, slot_records, "체감온도")
-                    if value is not None:
-                        rec["체감온도"] = str(value)
-                        rec.setdefault("_average_filled", []).append("체감온도")
-
-            _naturalize_generated_heat_values(rec, key, slot_idx)
-            rec["측정자"] = group_person or format_measurer(rec.get("측정자", ""))
-            rec["_slot_label"] = f"{HEAT_MAIN_SLOT_MINUTES[slot_idx] // 60:02d}시"
-            completed.append(rec)
-
-    completed.sort(key=lambda rec: (
-        str(rec.get("측정일자", "")),
-        normalize_for_match(rec.get("측정위치", "")),
-        heat_time_to_minutes(rec.get("측정시간")) if heat_time_to_minutes(rec.get("측정시간")) is not None else 10**9,
-    ))
-    return completed
-
 def is_implausible_value(temp, humidity) -> bool:
     """OCR/판독 오류일 가능성이 높은 비현실적 수치인지 확인 (자동 대체는 하지 않고 표시만 함)."""
     try:
@@ -4014,12 +2798,11 @@ def is_implausible_value(temp, humidity) -> bool:
 
 
 HEAT_EXPECTED_SLOTS = [("09시대", 8 * 60, 10 * 60), ("11시대", 10 * 60, 12 * 60),
-                        ("13시대", 12 * 60, 14 * 60), ("15시대", 14 * 60, 16 * 60),
-                        ("17시대", 16 * 60, 18 * 60)]
+                        ("13시대", 12 * 60, 14 * 60), ("15시대", 14 * 60, 16 * 60)]
 
 
 def get_slot_coverage_text(ws) -> str:
-    """하루 5회(09/11/13/15/17시 전후) 측정 슬롯의 기록 여부를 보여줌."""
+    """하루 기본 4회(9/11/13/15시 전후) 측정 슬롯 중 실제 기록이 있는 슬롯을 체크 표시로 보여줌."""
     recorded_minutes = []
     for r in range(6, 15):
         mins = heat_time_to_minutes(ws.cell(row=r, column=3).value)
@@ -4185,7 +2968,6 @@ def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
 
     for rec in records:
         raw_person = str(rec.get("측정자", "") or "").strip()
-        rec["_raw_measurer"] = raw_person
         formatted_person = format_measurer(raw_person)
         rec["측정자"] = formatted_person
         rec["_measurer_unrecognized"] = bool(raw_person and not formatted_person)
@@ -4223,7 +3005,7 @@ def prepare_heat_records_for_average(records: List[dict]) -> List[dict]:
             date_averages.get(rec.get("측정일자", ""), {}),
         )
 
-    return infer_measurer_per_location(records)
+    return records
 
 
 def clean_heat_auto_notes(existing_note: str) -> List[str]:
@@ -4261,16 +3043,21 @@ def ensure_heat_history_storage():
 
 
 def _empty_heat_upload_history() -> dict:
-    return {"processed_files": {}, "batches": []}
+    return {
+        "processed_files": {},
+        "batches": [],
+    }
 
 
 def load_heat_upload_history() -> dict:
+    """파일 해시와 시간대별 완료본 목록을 영구 저장한 JSON을 읽음."""
     ensure_heat_history_storage()
     if not os.path.exists(HEAT_UPLOAD_HISTORY_FILE):
         return _empty_heat_upload_history()
+
     try:
-        with open(HEAT_UPLOAD_HISTORY_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)
+        with open(HEAT_UPLOAD_HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
         if not isinstance(data, dict):
             return _empty_heat_upload_history()
         data.setdefault("processed_files", {})
@@ -4281,14 +3068,16 @@ def load_heat_upload_history() -> dict:
 
 
 def save_heat_upload_history(history: dict):
+    """기록 손상을 줄이기 위해 임시 파일에 쓴 뒤 원자적으로 교체."""
     ensure_heat_history_storage()
     temp_path = HEAT_UPLOAD_HISTORY_FILE + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as file:
-        json.dump(history, file, ensure_ascii=False, indent=2)
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
     os.replace(temp_path, HEAT_UPLOAD_HISTORY_FILE)
 
 
 def uploaded_file_hash(uploaded_file) -> Tuple[str, bytes]:
+    """파일명과 무관하게 실제 바이트 기준 SHA-256 해시를 계산."""
     file_bytes = uploaded_file.getvalue()
     return hashlib.sha256(file_bytes).hexdigest(), file_bytes
 
@@ -4301,16 +3090,23 @@ def _parse_history_datetime(value: str) -> Optional[datetime]:
 
 
 def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> Tuple[bool, dict]:
+    """새 파일이면 처리 예약. 이미 처리된 파일이면 False와 기존 메타데이터 반환."""
     now = datetime.now()
     with _HEAT_HISTORY_LOCK:
         history = load_heat_upload_history()
         existing = history["processed_files"].get(file_hash)
+
         if existing:
-            batch_id = str(existing.get("batch_id", "") or "")
-            batch_exists = any(str(batch.get("batch_id", "")) == batch_id for batch in history.get("batches", []))
+            status = str(existing.get("status", "completed"))
             started_at = _parse_history_datetime(existing.get("started_at", ""))
-            stale = existing.get("status") == "processing" and started_at and (now - started_at).total_seconds() > HEAT_PROCESSING_STALE_SECONDS
-            if existing.get("status") != "error" and not stale and batch_exists:
+            stale_processing = (
+                status == "processing"
+                and started_at is not None
+                and (now - started_at).total_seconds() > HEAT_PROCESSING_STALE_SECONDS
+            )
+
+            # 오류 건은 다음 세션에서 재시도 가능, 오래 멈춘 processing도 다시 처리.
+            if status != "error" and not stale_processing:
                 return False, existing
 
         reserved = {
@@ -4321,8 +3117,10 @@ def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> T
             "started_at": now.strftime("%Y-%m-%d %H:%M:%S"),
             "processed_at": "",
             "records_count": 0,
+            "new_records_count": 0,
+            "duplicate_records_count": 0,
+            "sheet_names": [],
             "batch_id": "",
-            "usage": {},
             "error": "",
         }
         history["processed_files"][file_hash] = reserved
@@ -4330,13 +3128,148 @@ def reserve_heat_upload(file_hash: str, original_name: str, file_size: int) -> T
         return True, reserved
 
 
-def _find_batch_by_id(history: dict, batch_id: str) -> Optional[dict]:
-    return next((batch for batch in history.get("batches", []) if str(batch.get("batch_id", "")) == str(batch_id or "")), None)
+def finalize_heat_upload(
+    file_hash: str,
+    status: str,
+    entries: List[dict],
+    error: str = "",
+):
+    successful_entries = [e for e in entries if not e.get("error")]
+    new_entries = [e for e in successful_entries if not e.get("duplicate")]
+    duplicate_entries = [e for e in successful_entries if e.get("duplicate")]
+    sheet_names = sorted({e.get("sheet", "") for e in successful_entries if e.get("sheet")})
+
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        meta = history["processed_files"].setdefault(file_hash, {"file_hash": file_hash})
+        meta.update({
+            "status": status,
+            "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "records_count": len(successful_entries),
+            "new_records_count": len(new_entries),
+            "duplicate_records_count": len(duplicate_entries),
+            "sheet_names": sheet_names,
+            "error": str(error or ""),
+        })
+        save_heat_upload_history(history)
 
 
-def _batch_path(batch: dict) -> str:
-    filename = os.path.basename(str(batch.get("snapshot_filename", "") or ""))
-    return os.path.join(HEAT_EXPORT_HISTORY_DIR, filename) if filename else ""
+def create_heat_batch_snapshot(new_file_infos: List[dict], new_entries: List[dict]) -> Optional[dict]:
+    """이번 업로드에서 정상 인식된 기록이 있으면 누적 엑셀 스냅샷 1개 생성.
+
+    완료 파일을 삭제한 뒤 같은 사진을 다시 올린 경우에는 기존 행과 중복이더라도
+    전체 누적 대장을 다시 내려받을 수 있도록 완료 파일을 재생성한다.
+    """
+    successful_entries = [e for e in new_entries if not e.get("error")]
+    actual_new_entries = [e for e in successful_entries if not e.get("duplicate")]
+    reused_entries = [e for e in successful_entries if e.get("duplicate")]
+    if not new_file_infos or not successful_entries or not os.path.exists(HEAT_LOG_FILE):
+        return None
+
+    file_hashes = sorted({info["file_hash"] for info in new_file_infos})
+    batch_signature = hashlib.sha256("|".join(file_hashes).encode("utf-8")).hexdigest()
+
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        for batch in history.get("batches", []):
+            if batch.get("batch_signature") == batch_signature:
+                return batch
+
+        now = datetime.now()
+        stamp = now.strftime("%Y%m%d_%H%M%S")
+        batch_id = f"{stamp}_{batch_signature[:8]}"
+        filename = f"체감온도측정_누적대장_{stamp}.xlsx"
+        snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+
+        suffix = 2
+        while os.path.exists(snapshot_path):
+            filename = f"체감온도측정_누적대장_{stamp}_{suffix}.xlsx"
+            snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+            suffix += 1
+
+        shutil.copy2(HEAT_LOG_FILE, snapshot_path)
+
+        batch = {
+            "batch_id": batch_id,
+            "batch_signature": batch_signature,
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "snapshot_filename": filename,
+            "source_files": [info.get("original_name", "") for info in new_file_infos],
+            "source_file_count": len(new_file_infos),
+            "new_records_count": len(actual_new_entries),
+            "reused_records_count": len(reused_entries),
+            "recognized_records_count": len(successful_entries),
+            "sheet_names": sorted({e.get("sheet", "") for e in successful_entries if e.get("sheet")}),
+        }
+        history.setdefault("batches", []).append(batch)
+
+        for info in new_file_infos:
+            meta = history["processed_files"].get(info["file_hash"])
+            if meta is not None:
+                meta["batch_id"] = batch_id
+
+        save_heat_upload_history(history)
+        return batch
+
+
+def get_heat_completed_batches() -> List[dict]:
+    history = load_heat_upload_history()
+    batches = []
+    for batch in history.get("batches", []):
+        filename = batch.get("snapshot_filename", "")
+        path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename) if filename else ""
+        if path and os.path.exists(path):
+            item = dict(batch)
+            item["snapshot_path"] = path
+            batches.append(item)
+    return sorted(batches, key=lambda x: x.get("created_at", ""), reverse=True)
+
+
+def delete_heat_completed_batch(batch_id: str) -> Tuple[bool, str]:
+    """시간대별 완료 파일과 목록을 삭제하고 해당 원본 사진의 재생성을 허용.
+
+    전체 누적 대장 행은 유지한다. 다만 이 완료 파일에 연결된 파일 해시만 제거해
+    같은 사진을 다시 올렸을 때 OCR 확인 후 완료 엑셀을 다시 만들 수 있게 한다.
+    """
+    batch_id = str(batch_id or "").strip()
+    if not batch_id:
+        return False, "삭제할 완료 파일 식별값이 없습니다."
+
+    with _HEAT_HISTORY_LOCK:
+        history = load_heat_upload_history()
+        batches = history.get("batches", [])
+        target = next((b for b in batches if str(b.get("batch_id", "")) == batch_id), None)
+
+        if target is None:
+            return False, "이미 삭제되었거나 완료 파일을 찾을 수 없습니다."
+
+        filename = os.path.basename(str(target.get("snapshot_filename", "") or ""))
+        if filename:
+            snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
+            try:
+                if os.path.isfile(snapshot_path):
+                    os.remove(snapshot_path)
+            except Exception as e:
+                return False, f"완료 파일 삭제 실패: {e}"
+
+        history["batches"] = [
+            b for b in batches
+            if str(b.get("batch_id", "")) != batch_id
+        ]
+
+        # 삭제된 완료본에 포함된 사진은 다시 업로드해 완료 파일을 재생성할 수 있도록
+        # 파일 단위 처리 이력만 제거한다. 전체 누적 대장의 측정 행은 삭제하지 않는다.
+        processed_files = history.get("processed_files", {})
+        removable_hashes = [
+            file_hash for file_hash, meta in processed_files.items()
+            if str(meta.get("batch_id", "")) == batch_id
+        ]
+        for file_hash in removable_hashes:
+            processed_files.pop(file_hash, None)
+
+        save_heat_upload_history(history)
+
+    return True, "완료 파일을 삭제했습니다. 같은 사진을 다시 올리면 완료 엑셀을 재생성할 수 있습니다."
 
 
 def _same_heat_number(a, b, field_name: str) -> bool:
@@ -4348,15 +3281,18 @@ def _same_heat_number(a, b, field_name: str) -> bool:
 
 
 def find_duplicate_heat_row(ws, row: dict) -> Optional[int]:
-    """같은 시간대 파일 안에서 동일 시간·핵심값이 겹치면 한 번만 기록."""
+    """파일 바이트가 달라도 장소·날짜·시간과 측정값이 같은 기록이면 중복으로 판단."""
     target_minutes = heat_time_to_minutes(row.get("측정시간"))
     if target_minutes is None:
         return None
+
     target_person = normalize_for_match(format_measurer(row.get("측정자", "")))
+
     for row_idx in range(6, 15):
         existing_minutes = heat_time_to_minutes(ws.cell(row=row_idx, column=3).value)
-        if existing_minutes is None or existing_minutes != target_minutes:
+        if existing_minutes != target_minutes:
             continue
+
         score = 0
         if _same_heat_number(ws.cell(row=row_idx, column=4).value, row.get("기온"), "기온"):
             score += 1
@@ -4364,450 +3300,485 @@ def find_duplicate_heat_row(ws, row: dict) -> Optional[int]:
             score += 1
         if _same_heat_number(ws.cell(row=row_idx, column=6).value, row.get("체감온도"), "체감온도"):
             score += 1
+
         existing_person = normalize_for_match(ws.cell(row=row_idx, column=7).value)
         if target_person and existing_person and target_person == existing_person:
             score += 1
+
+        # 동일 시간에 2개 이상의 핵심 값이 일치하면 같은 측정 기록으로 봄.
         if score >= 2:
             return row_idx
+
     return None
 
 
-def _save_record_to_batch_workbook(wb, template_ws, row: dict) -> Tuple[str, int, str, bool]:
-    location = row.get("측정위치", "미지정") or "미지정"
-    ws = get_or_create_heat_sheet(wb, template_ws, location, row.get("측정일자", ""))
-    duplicate_row = find_duplicate_heat_row(ws, row)
-    if duplicate_row is not None:
-        return ws.title, duplicate_row, "같은 시간대 파일 안의 중복 기록 건너뜀", True
+def render_heat_completed_file_list():
+    """시간대별 완료 엑셀을 다운로드하거나 목록에서 개별 삭제."""
+    batches = get_heat_completed_batches()
+    st.markdown("##### 시간대별 완료 파일")
 
-    target_row = find_empty_heat_slot(ws, template_ws)
-    if target_row is None:
-        raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
+    if not batches:
+        st.caption("아직 시간대별 완료 파일이 없습니다.")
+        return
 
-    row["측정자"] = format_measurer(row.get("측정자", ""))
-
-    ws.cell(target_row, 3, format_heat_time_display(row.get("측정시간", "")))
-    ws.cell(target_row, 4, _to_number(row.get("기온", "")))
-    ws.cell(target_row, 5, _to_number(row.get("습도", "")))
-    ws.cell(target_row, 6, _to_number(row.get("체감온도", "")))
-
-    measurer_cell = ws.cell(target_row, 7, format_measurer(row.get("측정자", "")))
-    measurer_cell.alignment = openpyxl.styles.Alignment(
-        horizontal="center",
-        vertical="center",
-        wrap_text=False,
+    st.caption(
+        f"완료 파일 {len(batches)}개 · 완료 파일을 삭제하면 해당 사진으로 다시 생성할 수 있습니다."
     )
 
-    # 비고란은 어떤 경우에도 작성하지 않는다.
-    remarks_cell = ws.cell(target_row, 8)
-    remarks_cell.value = None
+    for idx, batch in enumerate(batches):
+        created_at = batch.get("created_at", "")
+        source_files = [x for x in batch.get("source_files", []) if x]
+        source_text = ", ".join(source_files)
+        sheet_names = [x for x in batch.get("sheet_names", []) if x]
+        batch_id = str(batch.get("batch_id", "") or "")
 
-    return ws.title, target_row, "", False
+        col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
+        with col_info:
+            st.markdown(f"**{created_at} 완료**")
+            reused_count = int(batch.get("reused_records_count", 0) or 0)
+            record_text = f"신규 기록 {batch.get('new_records_count', 0)}건"
+            if reused_count:
+                record_text += f" · 기존 기록 재사용 {reused_count}건"
+            st.caption(
+                f"업로드 파일 {batch.get('source_file_count', len(source_files))}개 · "
+                f"{record_text} · 시트 {len(sheet_names)}개"
+            )
+            if source_text:
+                st.caption(f"원본: {source_text}")
 
-def create_heat_time_batch_file(new_file_infos: List[dict], file_results: List[dict]) -> Optional[dict]:
-    """이번 업로드에서 인식한 기록만 담은 독립 엑셀 파일을 생성. 누적 대장은 만들지 않는다."""
-    if not new_file_infos:
-        return None
+        with col_download:
+            try:
+                with open(batch["snapshot_path"], "rb") as f:
+                    snapshot_bytes = f.read()
+                st.download_button(
+                    "다운로드",
+                    data=snapshot_bytes,
+                    file_name=batch.get("snapshot_filename", "체감온도측정_누적대장.xlsx"),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key=f"heat_history_download_{batch_id or idx}",
+                )
+            except Exception as e:
+                st.caption(f"파일 읽기 실패: {e}")
 
-    all_records = []
-    for result in file_results:
-        for record_index, record in enumerate(result.get("records", [])):
-            copied = dict(record)
-            copied["_source_hash"] = result["file_hash"]
-            copied["_source_name"] = result["file_name"]
-            copied["_source_index"] = record_index
-            all_records.append(copied)
-    if not all_records:
-        return None
+        with col_delete:
+            if st.button(
+                "삭제",
+                use_container_width=True,
+                key=f"heat_history_delete_{batch_id or idx}",
+            ):
+                ok, message = delete_heat_completed_batch(batch_id)
+                if ok:
+                    # 화면에 남아 있는 기존 업로드 캐시도 지워 재업로드가 즉시 가능하게 함.
+                    st.session_state.pop("heat_saved", None)
+                    st.session_state["heat_uploader_version"] = (
+                        int(st.session_state.get("heat_uploader_version", 0)) + 1
+                    )
+                    st.rerun()
+                else:
+                    st.error(message)
 
-    all_records = prepare_heat_records_for_average(all_records)
-    all_records = optimize_records_near_two_hours(all_records)
-    all_records = complete_five_daily_measurements(all_records)
+        if idx < len(batches) - 1:
+            st.markdown("---")
+
+
+def save_heat_measurement(location: str, row: dict) -> Tuple[str, int, str, bool]:
+    """측정 1건 저장. 같은 기록이면 새 행을 만들지 않고 기존 행을 반환."""
     template_ws = load_heat_template_sheet()
     if template_ws is None:
-        raise ValueError("체감온도 엑셀 템플릿을 찾지 못했습니다.")
-
-    wb = openpyxl.Workbook()
-    wb.remove(wb.active)
-    entries = []
-    for record in all_records:
-        try:
-            sheet_name, row_number, note, duplicate = _save_record_to_batch_workbook(wb, template_ws, record)
-            entries.append({
-                "source_hash": record.get("_source_hash", ""),
-                "source_name": record.get("_source_name", ""),
-                "source_index": record.get("_source_index", 0),
-                "sheet": sheet_name,
-                "row": row_number,
-                "gap_note": note,
-                "values": record,
-                "duplicate": duplicate,
-                "error": None,
-            })
-        except Exception as error:
-            entries.append({
-                "source_hash": record.get("_source_hash", ""),
-                "source_name": record.get("_source_name", ""),
-                "source_index": record.get("_source_index", 0),
-                "sheet": None,
-                "row": None,
-                "gap_note": "",
-                "values": record,
-                "duplicate": False,
-                "error": str(error),
-            })
-
-    successful = [entry for entry in entries if not entry.get("error")]
-    if not successful:
-        return None
-
-    now = datetime.now()
-    file_hashes = sorted({info["file_hash"] for info in new_file_infos})
-    signature = hashlib.sha256("|".join(file_hashes).encode("utf-8")).hexdigest()
-    stamp = now.strftime("%Y%m%d_%H%M%S")
-    batch_id = f"{stamp}_{signature[:8]}"
-    filename = f"체감온도측정_시간대별_{stamp}.xlsx"
-    snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
-    suffix = 2
-    while os.path.exists(snapshot_path):
-        filename = f"체감온도측정_시간대별_{stamp}_{suffix}.xlsx"
-        snapshot_path = os.path.join(HEAT_EXPORT_HISTORY_DIR, filename)
-        suffix += 1
-    wb.save(snapshot_path)
-
-    usage_total = _empty_heat_usage_summary()
-    for result in file_results:
-        for call in result.get("usage", {}).get("calls", []):
-            merge_heat_usage(usage_total, call)
-
-    batch = {
-        "batch_id": batch_id,
-        "batch_signature": signature,
-        "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-        "snapshot_filename": filename,
-        "source_files": [info.get("original_name", "") for info in new_file_infos],
-        "source_file_count": len(new_file_infos),
-        "recognized_records_count": len(successful),
-        "sheet_names": sorted({entry.get("sheet", "") for entry in successful if entry.get("sheet")}),
-        "usage": usage_total,
-    }
+        raise ValueError(
+            f"템플릿 파일을 찾을 수 없습니다: {HEAT_TEMPLATE_XLSX} "
+            "(templates 폴더에 heat_index_template.xlsx를 추가해주세요)"
+        )
 
     with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        history.setdefault("batches", []).append(batch)
-        for result in file_results:
-            meta = history["processed_files"].setdefault(result["file_hash"], {})
-            meta.update({
-                "status": "completed",
-                "processed_at": now.strftime("%Y-%m-%d %H:%M:%S"),
-                "records_count": len([entry for entry in successful if entry.get("source_hash") == result["file_hash"]]),
-                "batch_id": batch_id,
-                "usage": result.get("usage", {}),
-                "error": "",
-            })
-        save_heat_upload_history(history)
+        if os.path.exists(HEAT_LOG_FILE):
+            wb = openpyxl.load_workbook(HEAT_LOG_FILE)
+        else:
+            wb = openpyxl.Workbook()
+            wb.remove(wb.active)
 
-    batch["snapshot_path"] = snapshot_path
-    batch["entries"] = entries
-    return batch
+        ws = get_or_create_heat_sheet(wb, template_ws, location, row["측정일자"])
 
+        # 기존 누적 대장 자체도 검사해, 파일명이 달라진 같은 사진/같은 측정값의 중복 저장을 막음.
+        duplicate_row = find_duplicate_heat_row(ws, row)
+        if duplicate_row is not None:
+            existing_note = str(ws.cell(row=duplicate_row, column=8).value or "").strip()
+            duplicate_note = "중복 기록 건너뜀(기존 기록 유지)"
+            display_note = " / ".join([x for x in [existing_note, duplicate_note] if x])
+            return ws.title, duplicate_row, display_note, True
 
-def finalize_heat_upload_error(file_hash: str, error: str):
-    with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        meta = history["processed_files"].setdefault(file_hash, {"file_hash": file_hash})
-        meta.update({"status": "error", "processed_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "error": str(error or "")})
-        save_heat_upload_history(history)
+        target_row = find_empty_heat_slot(ws, template_ws)
+        if target_row is None:
+            raise ValueError(f"'{ws.title}' 기록은 이미 9건이 모두 채워져 있습니다.")
 
+        notes = []
+        row["측정자"] = format_measurer(row.get("측정자", ""))
+        if row.get("_measurer_unrecognized"):
+            notes.append("⚠️측정자 확인필요(등록된 11명 외 이름은 저장하지 않음)")
 
-def get_heat_completed_batches() -> List[dict]:
-    history = load_heat_upload_history()
-    batches = []
-    for batch in history.get("batches", []):
-        path = _batch_path(batch)
-        if path and os.path.isfile(path):
-            item = dict(batch)
-            item["snapshot_path"] = path
-            batches.append(item)
-    return sorted(batches, key=lambda item: item.get("created_at", ""), reverse=True)
+        # 판독 공백 자동 보완: 같은 장소·날짜 평균을 우선 사용하고,
+        # 자료가 없으면 같은 날짜의 다른 장소 평균을 보조로 사용한다.
+        same_sheet_averages = get_heat_field_averages_from_sheet(ws)
+        same_date_averages = get_heat_field_averages_from_workbook_date(
+            wb, row["측정일자"], exclude_sheet=ws.title
+        )
+        _, _, unavailable_fields = fill_missing_heat_values(
+            row, same_sheet_averages, same_date_averages
+        )
+        notes.extend(build_heat_auto_notes(row, unavailable_fields))
 
+        new_min = heat_time_to_minutes(row["측정시간"])
+        if target_row > 6 and new_min is not None:
+            for prev_row in range(target_row - 1, 5, -1):
+                prev_min = heat_time_to_minutes(ws.cell(row=prev_row, column=3).value)
+                if prev_min is not None:
+                    if new_min - prev_min > HEAT_LOG_GAP_MINUTES:
+                        notes.append(f"간격초과({new_min - prev_min}분 경과, 측정 누락 가능성)")
+                    break
 
-def delete_heat_completed_batch(batch_id: str) -> Tuple[bool, str]:
-    with _HEAT_HISTORY_LOCK:
-        history = load_heat_upload_history()
-        target = _find_batch_by_id(history, batch_id)
-        if target is None:
-            return False, "이미 삭제되었거나 파일을 찾을 수 없습니다."
-        path = _batch_path(target)
-        try:
-            if path and os.path.isfile(path):
-                os.remove(path)
-        except Exception as error:
-            return False, f"파일 삭제 실패: {error}"
+        if is_implausible_value(row["기온"], row["습도"]):
+            notes.append("⚠️확인필요(비현실적 수치, OCR 오독 가능성 - 직접 확인 후 수정 필요)")
 
-        history["batches"] = [batch for batch in history.get("batches", []) if str(batch.get("batch_id", "")) != str(batch_id)]
-        for file_hash in [key for key, meta in history.get("processed_files", {}).items() if str(meta.get("batch_id", "")) == str(batch_id)]:
-            history["processed_files"].pop(file_hash, None)
-        save_heat_upload_history(history)
-    return True, "시간대별 파일을 삭제했습니다."
+        gap_note = " / ".join(notes)
 
+        ws.cell(row=target_row, column=3, value=format_heat_time_display(row["측정시간"]))
+        ws.cell(row=target_row, column=4, value=_to_number(row["기온"]))
+        ws.cell(row=target_row, column=5, value=_to_number(row["습도"]))
+        ws.cell(row=target_row, column=6, value=_to_number(row["체감온도"]))
+        ws.cell(row=target_row, column=7, value=format_measurer(row["측정자"]))
+        ws.cell(row=target_row, column=8, value=gap_note)
 
-def get_heat_batch_download(batch_id: str) -> Optional[dict]:
-    history = load_heat_upload_history()
-    batch = _find_batch_by_id(history, batch_id)
-    if not batch:
-        return None
-    path = _batch_path(batch)
-    if not path or not os.path.isfile(path):
-        return None
-    item = dict(batch)
-    item["snapshot_path"] = path
-    return item
+        wb.save(HEAT_LOG_FILE)
+        return ws.title, target_row, gap_note, False
 
 
-def overwrite_heat_batch_row(batch_id: str, sheet_name: str, target_row: int, fields: dict) -> Tuple[dict, str]:
-    batch = get_heat_batch_download(batch_id)
-    if not batch:
-        raise ValueError("수정할 시간대별 엑셀 파일을 찾지 못했습니다.")
-    wb = openpyxl.load_workbook(batch["snapshot_path"])
+def overwrite_heat_row(sheet_name: str, target_row: int, fields: dict) -> Tuple[dict, str]:
+    """이미 저장된 칸을 덮어씀. 수정 화면에서 값을 비워도 주변 평균으로 다시 보완."""
+    if not os.path.exists(HEAT_LOG_FILE):
+        raise ValueError("저장된 기록 파일이 없습니다.")
+    wb = openpyxl.load_workbook(HEAT_LOG_FILE)
     if sheet_name not in wb.sheetnames:
-        raise ValueError(f"'{sheet_name}' 시트를 찾지 못했습니다.")
+        raise ValueError(f"'{sheet_name}' 시트를 찾을 수 없습니다.")
     ws = wb[sheet_name]
 
+    # 측정자는 지정된 11명만 저장하며 직책과 관계없이 이름 대원 형식으로 통일한다.
     raw_person = str(fields.get("측정자", "") or "").strip()
     normalized_person = format_measurer(raw_person)
     if raw_person and not normalized_person:
         raise ValueError("측정자는 지정된 11명 중 한 명만 입력할 수 있습니다.")
     fields["측정자"] = normalized_person
+
+    # 사용자가 수정 입력에서 빈 값을 남긴 경우에도 같은 장소·날짜 평균으로 보완한다.
     fields.pop("_average_filled", None)
     fields.pop("_heat_index_calculated", None)
     same_sheet_averages = get_heat_field_averages_from_sheet(ws, exclude_row=target_row)
-    _, _, unavailable = fill_missing_heat_values(fields, same_sheet_averages, {})
-    note_text = ""
 
-    ws.cell(target_row, 3, format_heat_time_display(fields.get("측정시간", "")))
-    ws.cell(target_row, 4, _to_number(fields.get("기온", "")))
-    ws.cell(target_row, 5, _to_number(fields.get("습도", "")))
-    ws.cell(target_row, 6, _to_number(fields.get("체감온도", "")))
-
-    measurer_cell = ws.cell(target_row, 7, normalized_person)
-    measurer_cell.alignment = openpyxl.styles.Alignment(
-        horizontal="center",
-        vertical="center",
-        wrap_text=False,
+    date_match = re.search(r"_(\d{4})(?:_\d+)?$", sheet_name)
+    date_str = date_match.group(1) if date_match else ""
+    same_date_averages = get_heat_field_averages_from_workbook_date(
+        wb, date_str, exclude_sheet=sheet_name
+    )
+    _, _, unavailable_fields = fill_missing_heat_values(
+        fields, same_sheet_averages, same_date_averages
     )
 
-    # 수정 저장 시에도 비고란은 항상 공란으로 유지한다.
-    ws.cell(target_row, 8).value = None
-    wb.save(batch["snapshot_path"])
+    existing_notes = clean_heat_auto_notes(ws.cell(row=target_row, column=8).value)
+    existing_notes.extend(build_heat_auto_notes(fields, unavailable_fields))
+    note_text = " / ".join(existing_notes)
+
+    ws.cell(row=target_row, column=3, value=format_heat_time_display(fields["측정시간"]))
+    ws.cell(row=target_row, column=4, value=_to_number(fields["기온"]))
+    ws.cell(row=target_row, column=5, value=_to_number(fields["습도"]))
+    ws.cell(row=target_row, column=6, value=_to_number(fields["체감온도"]))
+    ws.cell(row=target_row, column=7, value=format_measurer(fields["측정자"]))
+    ws.cell(row=target_row, column=8, value=note_text)
+    wb.save(HEAT_LOG_FILE)
     return fields, note_text
-
-
-def render_heat_completed_file_list():
-    batches = get_heat_completed_batches()
-    st.markdown("#### 시간대별 완료 파일")
-    if not batches:
-        st.caption("아직 생성된 시간대별 파일이 없습니다.")
-        return
-
-    for index, batch in enumerate(batches):
-        col_info, col_download, col_delete = st.columns([4.8, 1.15, 0.85])
-        with col_info:
-            st.markdown(f"**{batch.get('created_at', '')} 완료**")
-            st.caption(
-                f"업로드 {batch.get('source_file_count', 0)}개 · 기록 {batch.get('recognized_records_count', 0)}건 · "
-                f"시트 {len(batch.get('sheet_names', []))}개"
-            )
-            source_text = ", ".join([name for name in batch.get("source_files", []) if name])
-            if source_text:
-                st.caption(f"원본: {source_text}")
-        with col_download:
-            with open(batch["snapshot_path"], "rb") as file:
-                data = file.read()
-            st.download_button(
-                "다운로드", data=data,
-                file_name=batch.get("snapshot_filename", "체감온도측정_시간대별.xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key=f"heat_batch_download_{batch.get('batch_id', index)}",
-            )
-        with col_delete:
-            if st.button("삭제", use_container_width=True, key=f"heat_batch_delete_{batch.get('batch_id', index)}"):
-                ok, message = delete_heat_completed_batch(batch.get("batch_id", ""))
-                if ok:
-                    st.session_state.pop("heat_saved", None)
-                    st.session_state["heat_uploader_version"] = int(st.session_state.get("heat_uploader_version", 0)) + 1
-                    st.rerun()
-                st.error(message)
-        if index < len(batches) - 1:
-            st.markdown("---")
 
 
 def render_heat_index_log():
     st.markdown("---")
     st.markdown(
-        '<h2 style="color:#e8590c; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">체감온도 측정 기록</h2>',
-        unsafe_allow_html=True,
+        """
+        <h2 style="color:#e8590c; font-weight:800; font-size:48px; margin-top:0.35rem; margin-bottom:0.35rem;">
+            체감온도 측정 기록
+        </h2>
+        """,
+        unsafe_allow_html=True
     )
 
     if openpyxl is None:
-        st.error("openpyxl 패키지가 설치되어 있지 않습니다.")
+        st.error("openpyxl 패키지가 설치되어 있지 않습니다. requirements.txt에 openpyxl을 추가해주세요.")
         return
+
     if not os.path.exists(HEAT_TEMPLATE_XLSX):
-        st.error("templates/heat_index_template.xlsx 파일이 없습니다.")
+        st.error(
+            "템플릿 파일이 없습니다. 저장소의 templates/heat_index_template.xlsx 위치에 "
+            "체감온도측정 대장 양식을 추가해주세요."
+        )
         return
+
     if "GPT_API_KEY" not in st.secrets:
-        st.error("Secrets에 GPT_API_KEY 설정이 필요합니다.")
+        st.error("Secrets에 GPT_API_KEY 설정이 필요합니다. (기존 번역 기능과 같은 키를 사용합니다)")
         return
 
     api_key = st.secrets["GPT_API_KEY"]
-    st.session_state.setdefault("heat_saved", {})
-    st.session_state.setdefault("heat_uploader_version", 0)
+
+    if "heat_saved" not in st.session_state:
+        st.session_state["heat_saved"] = {}
+    if "heat_uploader_version" not in st.session_state:
+        st.session_state["heat_uploader_version"] = 0
 
     heat_files = st.file_uploader(
         "측정 사진 업로드",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif"],
-        key=f"heat_index_uploader_{st.session_state['heat_uploader_version']}",
+        key=f"heat_index_uploader_{st.session_state['heat_uploader_version']}"
     )
 
-    render_items = []
     new_file_infos = []
-    new_results = []
+    new_entries_for_snapshot = []
+    render_items = []
 
     if heat_files:
-        for uploaded in heat_files:
-            file_hash, file_bytes = uploaded_file_hash(uploaded)
-            if file_hash in st.session_state["heat_saved"]:
-                render_items.append(st.session_state["heat_saved"][file_hash])
+        for f in heat_files:
+            file_hash, file_bytes = uploaded_file_hash(f)
+            session_key = file_hash
+
+            if session_key in st.session_state["heat_saved"]:
+                render_items.append(st.session_state["heat_saved"][session_key])
                 continue
 
-            should_process, existing_meta = reserve_heat_upload(file_hash, uploaded.name, len(file_bytes))
+            should_process, existing_meta = reserve_heat_upload(file_hash, f.name, len(file_bytes))
+
             if not should_process:
-                item = {"file_hash": file_hash, "file_name": uploaded.name, "duplicate_file": True, "meta": existing_meta, "entries": []}
-                st.session_state["heat_saved"][file_hash] = item
+                item = {
+                    "file_hash": file_hash,
+                    "file_name": f.name,
+                    "duplicate_file": True,
+                    "meta": existing_meta,
+                    "entries": [],
+                }
+                st.session_state["heat_saved"][session_key] = item
                 render_items.append(item)
                 continue
 
-            suffix = os.path.splitext(uploaded.name)[1].lower() or ".jpg"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp:
-                temp.write(file_bytes)
-                original_path = temp.name
+            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(file_bytes)
+                original_path = tmp.name
 
+            entries = []
             process_error = ""
-            records, usage = [], _empty_heat_usage_summary()
-            with st.spinner(f"{uploaded.name} 분석 중..."):
+            with st.spinner(f"{f.name} 분석 및 자동저장 중..."):
                 try:
-                    records, usage = extract_heat_records_with_gpt(api_key, original_path)
-                except Exception as error:
-                    process_error = str(error)
-                    finalize_heat_upload_error(file_hash, process_error)
-            try:
-                os.remove(original_path)
-            except Exception:
-                pass
+                    records = extract_heat_records_with_gpt(api_key, original_path)
+                    records = prepare_heat_records_for_average(records)
+
+                    for rec in records:
+                        try:
+                            sheet_name, target_row, gap_note, was_duplicate = save_heat_measurement(
+                                rec["측정위치"], rec
+                            )
+                            rec["측정시간"] = format_heat_time_display(rec["측정시간"])
+                            rec["측정자"] = format_measurer(rec["측정자"])
+                            entries.append({
+                                "sheet": sheet_name,
+                                "row": target_row,
+                                "gap_note": gap_note,
+                                "values": rec,
+                                "duplicate": was_duplicate,
+                                "error": None,
+                            })
+                        except Exception as e:
+                            entries.append({
+                                "sheet": None,
+                                "row": None,
+                                "gap_note": "",
+                                "values": rec,
+                                "duplicate": False,
+                                "error": str(e),
+                            })
+
+                    status = "completed" if records else "no_records"
+                    finalize_heat_upload(file_hash, status, entries)
+
+                except Exception as e:
+                    process_error = str(e)
+                    finalize_heat_upload(file_hash, "error", entries, error=process_error)
+
+            if os.path.exists(original_path):
+                try:
+                    os.remove(original_path)
+                except Exception:
+                    pass
 
             item = {
                 "file_hash": file_hash,
-                "file_name": uploaded.name,
+                "file_name": f.name,
                 "duplicate_file": False,
-                "meta": {"status": "error" if process_error else "analyzed", "error": process_error, "usage": usage},
-                "records": records,
-                "entries": [],
+                "meta": {
+                    "status": "error" if process_error else ("completed" if entries else "no_records"),
+                    "error": process_error,
+                },
+                "entries": entries,
             }
-            st.session_state["heat_saved"][file_hash] = item
+            st.session_state["heat_saved"][session_key] = item
             render_items.append(item)
-            if not process_error:
-                new_file_infos.append({"file_hash": file_hash, "original_name": uploaded.name})
-                new_results.append({"file_hash": file_hash, "file_name": uploaded.name, "records": records, "usage": usage})
 
-        created_batch = create_heat_time_batch_file(new_file_infos, new_results)
+            if not process_error:
+                new_file_infos.append({
+                    "file_hash": file_hash,
+                    "original_name": f.name,
+                })
+                new_entries_for_snapshot.extend(entries)
+
+        # 한 번에 선택한 새 사진들을 하나의 시간대 완료 파일로 묶음.
+        created_batch = create_heat_batch_snapshot(new_file_infos, new_entries_for_snapshot)
         if created_batch:
-            entries_by_hash = {}
-            for entry in created_batch.get("entries", []):
-                entries_by_hash.setdefault(entry.get("source_hash", ""), []).append(entry)
-            for item in render_items:
-                if item.get("file_hash") in entries_by_hash:
-                    item["entries"] = entries_by_hash[item["file_hash"]]
-                    item["meta"]["batch_id"] = created_batch["batch_id"]
-                    st.session_state["heat_saved"][item["file_hash"]] = item
+            reused_count = int(created_batch.get("reused_records_count", 0) or 0)
+            result_text = f"신규 기록 {created_batch.get('new_records_count', 0)}건"
+            if reused_count:
+                result_text += f" · 기존 기록 재사용 {reused_count}건"
             st.success(
-                f"시간대별 엑셀 생성 완료: {created_batch.get('created_at', '')} · "
-                f"완성 기록 {created_batch.get('recognized_records_count', 0)}건(구역별 5회)"
+                f"시간대별 완료 파일 생성: {created_batch['created_at']} · {result_text}"
             )
-        elif new_file_infos and not any(result.get("records") for result in new_results):
-            st.warning("인식된 측정 기록이 없어 시간대별 엑셀을 만들지 못했습니다.")
 
         for item in render_items:
             file_name = item.get("file_name", "업로드 파일")
+
             if item.get("duplicate_file"):
                 meta = item.get("meta", {})
-                batch = get_heat_batch_download(meta.get("batch_id", ""))
+                processed_at = meta.get("processed_at") or meta.get("started_at") or "이전 처리 시각"
+                records_count = meta.get("records_count", 0)
                 with st.expander(f"♻️ {file_name} — 이미 처리된 파일", expanded=False):
-                    st.info("동일한 사진은 다시 분석하지 않았습니다.")
-                    if batch:
-                        with open(batch["snapshot_path"], "rb") as file:
-                            data = file.read()
+                    st.info(
+                        f"동일한 파일 내용이 {processed_at}에 이미 처리되어 새 행을 만들지 않았습니다. "
+                        f"기존 인식 기록: {records_count}건"
+                    )
+                    if os.path.exists(HEAT_LOG_FILE):
+                        with open(HEAT_LOG_FILE, "rb") as f:
+                            duplicate_master_bytes = f.read()
                         st.download_button(
-                            "기존 시간대별 엑셀 다운로드", data=data,
-                            file_name=batch.get("snapshot_filename", "체감온도측정_시간대별.xlsx"),
+                            "현재 누적 대장 엑셀 다운로드",
+                            data=duplicate_master_bytes,
+                            file_name=f"체감온도측정_전체누적대장_{datetime.now().strftime('%Y%m%d')}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key=f"heat_duplicate_download_{item['file_hash']}",
+                            key=f"heat_duplicate_master_download_{file_hash}",
                         )
                 continue
 
-            error = item.get("meta", {}).get("error", "")
             entries = item.get("entries", [])
-            usage = item.get("meta", {}).get("usage", {}) or {}
+            meta = item.get("meta", {})
+            process_error = meta.get("error", "")
+
             with st.expander(f"📷 {file_name} — {len(entries)}건 인식", expanded=True):
-                if error:
-                    st.error(f"분석 실패: {error}")
+                if process_error:
+                    st.error(f"분석 실패: {process_error}")
                     continue
+
                 if not entries:
-                    st.warning("이 사진에서 측정 기록을 찾지 못했습니다.")
-                    continue
+                    st.warning("이 사진에서 측정 기록을 찾지 못했습니다. 같은 사진의 자동 반복 분석은 막았습니다.")
 
-                batch_id = item.get("meta", {}).get("batch_id", "")
-                for entry_index, entry in enumerate(entries):
-                    if entry.get("error"):
-                        st.error(f"엑셀 기록 실패: {entry['error']}")
+                for i, entry in enumerate(entries):
+                    if entry["error"]:
+                        st.error(f"저장 실패: {entry['error']}")
                         continue
-                    st.success(f"✅ '{entry['sheet']}' 시트 {entry['row'] - 5}번째 줄")
-                    if entry.get("gap_note"):
-                        if "⚠️" in entry["gap_note"]:
-                            st.error(entry["gap_note"])
-                        elif "간격초과" in entry["gap_note"]:
-                            st.warning(entry["gap_note"])
-                        else:
-                            st.info(entry["gap_note"])
 
-                    values = entry["values"]
-                    left, right = st.columns(2)
-                    with left:
-                        st.caption(f"측정위치: {values.get('측정위치', '')} | 측정일자: {values.get('측정일자', '')}")
-                        new_time = st.text_input("측정시간", format_heat_time_display(values.get("측정시간", "")), key=f"heat_time_{item['file_hash']}_{entry_index}")
-                        new_temp = st.text_input("기온", values.get("기온", ""), key=f"heat_temp_{item['file_hash']}_{entry_index}")
-                    with right:
-                        new_humidity = st.text_input("습도", values.get("습도", ""), key=f"heat_humidity_{item['file_hash']}_{entry_index}")
-                        new_heat = st.text_input("체감온도", values.get("체감온도", ""), key=f"heat_feels_{item['file_hash']}_{entry_index}")
-                        new_person = st.text_input("측정자", values.get("측정자", ""), key=f"heat_person_{item['file_hash']}_{entry_index}")
+                    if entry.get("duplicate"):
+                        st.info(
+                            f"♻️ 기존 기록과 동일하여 새 행을 만들지 않음 → "
+                            f"'{entry['sheet']}' 시트 {entry['row']-5}번째 줄 유지"
+                        )
+                    else:
+                        st.success(f"✅ 자동저장됨 → '{entry['sheet']}' 시트 {entry['row']-5}번째 줄")
 
-                    if st.button("수정 반영", key=f"heat_fix_{item['file_hash']}_{entry_index}"):
+                    if "⚠️확인필요" in entry["gap_note"]:
+                        st.error(entry["gap_note"])
+                    elif "간격초과" in entry["gap_note"]:
+                        st.warning(entry["gap_note"])
+                    elif entry["gap_note"] and not entry.get("duplicate"):
+                        st.info(entry["gap_note"])
+
+                    wb_preview = openpyxl.load_workbook(HEAT_LOG_FILE)
+                    if entry["sheet"] in wb_preview.sheetnames:
+                        st.caption(
+                            f"오늘 이 장소 측정현황(4회 기준): "
+                            f"{get_slot_coverage_text(wb_preview[entry['sheet']])}"
+                        )
+
+                    # 중복으로 건너뛴 기존 행은 현재 업로드에서 수정하지 않음.
+                    if entry.get("duplicate"):
+                        continue
+
+                    v = entry["values"]
+                    ec1, ec2 = st.columns(2)
+                    with ec1:
+                        st.caption(f"측정위치: {v['측정위치']}  |  측정일자: {v['측정일자']}")
+                        new_time = st.text_input(
+                            "측정시간", v["측정시간"],
+                            key=f"heat_time_{item['file_hash']}_{i}"
+                        )
+                        new_temp = st.text_input(
+                            "기온", v["기온"],
+                            key=f"heat_temp_{item['file_hash']}_{i}"
+                        )
+                    with ec2:
+                        new_hum = st.text_input(
+                            "습도", v["습도"],
+                            key=f"heat_hum_{item['file_hash']}_{i}"
+                        )
+                        new_feels = st.text_input(
+                            "체감온도", v["체감온도"],
+                            key=f"heat_feels_{item['file_hash']}_{i}"
+                        )
+                        new_person = st.text_input(
+                            "측정자", v["측정자"],
+                            key=f"heat_person_{item['file_hash']}_{i}"
+                        )
+
+                    if st.button("수정 반영", key=f"heat_fix_{item['file_hash']}_{i}"):
+                        fixed = {
+                            "측정시간": new_time.strip(),
+                            "기온": new_temp.strip(),
+                            "습도": new_hum.strip(),
+                            "체감온도": new_feels.strip(),
+                            "측정자": new_person.strip(),
+                        }
                         try:
-                            fixed, note = overwrite_heat_batch_row(batch_id, entry["sheet"], entry["row"], {
-                                "측정시간": new_time.strip(), "기온": new_temp.strip(), "습도": new_humidity.strip(),
-                                "체감온도": new_heat.strip(), "측정자": new_person.strip(),
-                            })
+                            fixed, updated_note = overwrite_heat_row(entry["sheet"], entry["row"], fixed)
+                            fixed["측정시간"] = format_heat_time_display(fixed["측정시간"])
+                            fixed["측정자"] = format_measurer(fixed["측정자"])
                             entry["values"].update(fixed)
-                            entry["gap_note"] = note
-                            st.success("시간대별 엑셀 파일에 수정 반영했습니다.")
-                        except Exception as fix_error:
-                            st.error(f"수정 실패: {fix_error}")
+                            entry["gap_note"] = updated_note
+                            st.success("수정 반영되었습니다. 빈 측정값은 평균치로 자동 보완됩니다.")
+                        except Exception as e:
+                            st.error(f"수정 실패: {e}")
+
+    st.markdown("#### 누적 기록")
+    if os.path.exists(HEAT_LOG_FILE):
+        wb = openpyxl.load_workbook(HEAT_LOG_FILE)
+        st.caption(f"저장된 일자별 기록 시트: {', '.join(wb.sheetnames)}")
+
+        today_str = datetime.now().strftime("%Y%m%d")
+        with open(HEAT_LOG_FILE, "rb") as f:
+            master_bytes = f.read()
+        st.download_button(
+            "전체 누적 대장 엑셀 다운로드",
+            data=master_bytes,
+            file_name=f"체감온도측정_전체누적대장_{today_str}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="heat_log_download_btn"
+        )
+    else:
+        st.info("아직 저장된 측정 기록이 없습니다.")
 
     render_heat_completed_file_list()
 
+
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
-    install_playwright_browser()
     hide_streamlit_ui()
 
     render_app_title()
