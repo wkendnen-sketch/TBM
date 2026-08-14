@@ -61,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 8월 모바일 일일안전회의 버튼 표시 안정화 버전"
+APP_VERSION = "26년 8월 일일안전회의 즉시 버튼·OCR 후처리 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -1876,6 +1876,16 @@ def render_daily_safety_meeting():
         unsafe_allow_html=True
     )
 
+    # ------------------------------------------------------------
+    # 중요:
+    # 예전 코드는 자재입고 사진을 올리는 즉시 모든 사진에 강화 OCR을 실행한 뒤
+    # st.button()까지 내려갔다. 그래서 화면에는 버튼이 보이더라도 Streamlit 스크립트가
+    # 계속 실행 중이라 버튼이 회색/비활성처럼 보이고 실제로 클릭할 수 없었다.
+    #
+    # 이제 업로드 단계에서는 OCR/고용량 변환을 절대 하지 않는다.
+    # 버튼을 먼저 즉시 렌더링하고, 사용자가 버튼을 누른 뒤에만 OCR + PPT 생성을 실행한다.
+    # ------------------------------------------------------------
+
     bad_files = st.file_uploader(
         "부적합사진",
         accept_multiple_files=True,
@@ -1883,31 +1893,27 @@ def render_daily_safety_meeting():
         key="daily_bad_uploader"
     )
 
-    bad_items = []
-    material_items = []
-    temp_paths = []
+    bad_text_values = []
 
     if bad_files:
         if len(bad_files) > MAX_DAILY_FILES_SOFT_WARN:
-            st.warning(f"부적합사진이 {len(bad_files)}장입니다. 자동 축소 처리하지만 생성 시간이 길어질 수 있습니다.")
+            st.warning(
+                f"부적합사진이 {len(bad_files)}장입니다. "
+                "생성 버튼을 누른 뒤 자동 축소 처리합니다."
+            )
+
         st.markdown("#### 부적합사진")
 
         for idx, f in enumerate(bad_files):
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(f.getbuffer())
-                original_path = tmp.name
-                temp_paths.append(original_path)
-
-            jpg_path = convert_to_jpg(original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
-            temp_paths.append(jpg_path)
-
-            with st.expander(f"부적합사진 #{idx + 1}", expanded=True):
+            with st.expander(f"부적합사진 #{idx + 1}", expanded=False):
                 c1, c2 = st.columns([1, 4])
 
                 with c1:
-                    st.image(jpg_path, width=130)
+                    # 업로드 단계에서는 임시 JPG 변환 없이 원본 미리보기만 표시.
+                    try:
+                        st.image(f, width=130)
+                    except Exception:
+                        st.caption(f.name)
 
                 with c2:
                     text_value = st.text_input(
@@ -1916,8 +1922,9 @@ def render_daily_safety_meeting():
                         placeholder="예: 자재 반입 확인",
                         key=f"daily_bad_text_{idx}"
                     )
+                    st.caption(f.name)
 
-            bad_items.append(DailySlideData(jpg_path, text_value, get_image_orientation(jpg_path)))
+            bad_text_values.append(text_value)
 
     material_files = st.file_uploader(
         "자재입고 및 고위험작업",
@@ -1928,40 +1935,26 @@ def render_daily_safety_meeting():
 
     if material_files:
         if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
-            st.warning(f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. OCR 때문에 시간이 오래 걸릴 수 있습니다.")
+            st.warning(
+                f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. "
+                "OCR은 생성 버튼을 누른 뒤 실행합니다."
+            )
+
         st.markdown("#### 자재입고 및 고위험작업")
 
+        # 여기서는 OCR을 하지 않는다. 파일명/간단 미리보기만 보여준다.
         for idx, f in enumerate(material_files):
-            suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(f.getbuffer())
-                material_original_path = tmp.name
-                temp_paths.append(material_original_path)
-
-            material_jpg_path = convert_to_jpg(material_original_path, max_size=DAILY_IMAGE_MAX_SIZE, quality=DAILY_IMAGE_QUALITY)
-            temp_paths.append(material_jpg_path)
-
-            item = classify_material_work_image(
-                material_jpg_path,
-                original_name=f.name,
-                upload_index=idx,
-                ocr_image_path=material_original_path
-            )
-            material_items.append(item)
-
             c1, c2 = st.columns([1, 4])
             with c1:
-                st.image(material_jpg_path, width=130)
+                try:
+                    st.image(f, width=110)
+                except Exception:
+                    st.caption("사진")
             with c2:
-                kind_label = "25대 고위험작업" if item.work_type == "high_risk" else "자재입고현황"
-                st.caption(f"{idx + 1}번 / {kind_label} / {item.company} / 번호 {item.number}")
-                st.caption(f.name)
-                # OCR 원문/실패 문구는 화면에 표시하지 않음.
+                st.caption(f"{idx + 1}. {f.name}")
+                st.caption("분류·업체명·순서는 PPT 생성 시 OCR로 자동 판독")
 
-    # 모바일에서 생성 버튼이 아래 부적합사진 저장소 영역과 겹치거나
-    # 화면 밖으로 밀려 클릭하지 못하는 현상을 방지하기 위해,
-    # OCR/사진 처리 직후 독립된 전체폭 버튼으로 먼저 렌더링한다.
+    # 업로더 바로 다음에 버튼을 즉시 렌더링한다.
     st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
     daily_create_clicked = st.button(
@@ -1974,20 +1967,92 @@ def render_daily_safety_meeting():
     st.markdown("<div style='height:0.6rem'></div>", unsafe_allow_html=True)
 
     if daily_create_clicked:
+        bad_items = []
+        material_items = []
+        temp_paths = []
+
         try:
+            # 1. 부적합사진 변환
+            if bad_files:
+                with st.spinner("부적합사진 처리 중..."):
+                    for idx, f in enumerate(bad_files):
+                        suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                            tmp.write(f.getvalue())
+                            original_path = tmp.name
+                            temp_paths.append(original_path)
+
+                        jpg_path = convert_to_jpg(
+                            original_path,
+                            max_size=DAILY_IMAGE_MAX_SIZE,
+                            quality=DAILY_IMAGE_QUALITY
+                        )
+                        temp_paths.append(jpg_path)
+
+                        text_value = bad_text_values[idx] if idx < len(bad_text_values) else ""
+                        bad_items.append(
+                            DailySlideData(
+                                jpg_path,
+                                text_value,
+                                get_image_orientation(jpg_path)
+                            )
+                        )
+
+            # 2. 자재입고/25대 고위험 OCR
+            if material_files:
+                progress = st.progress(0, text="자재입고 및 고위험작업 OCR 준비 중...")
+
+                total = len(material_files)
+                for idx, f in enumerate(material_files):
+                    progress.progress(
+                        idx / max(1, total),
+                        text=f"OCR 판독 중... {idx + 1}/{total} · {f.name}"
+                    )
+
+                    suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
+
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                        tmp.write(f.getvalue())
+                        material_original_path = tmp.name
+                        temp_paths.append(material_original_path)
+
+                    material_jpg_path = convert_to_jpg(
+                        material_original_path,
+                        max_size=DAILY_IMAGE_MAX_SIZE,
+                        quality=DAILY_IMAGE_QUALITY
+                    )
+                    temp_paths.append(material_jpg_path)
+
+                    item = classify_material_work_image(
+                        material_jpg_path,
+                        original_name=f.name,
+                        upload_index=idx,
+                        ocr_image_path=material_original_path
+                    )
+                    material_items.append(item)
+
+                progress.progress(1.0, text="OCR 판독 완료")
+
+            # 3. 정렬 + PPT 생성
             with st.spinner("PPT 생성 중..."):
                 sorted_material_items = sort_material_work_items(material_items)
                 ppt = build_daily_ppt(bad_items, sorted_material_items)
 
-            save_generated_ppt_to_bad_photo_storage(ppt, DAILY_OUTPUT_PPT_NAME)
+            save_generated_ppt_to_bad_photo_storage(
+                ppt,
+                DAILY_OUTPUT_PPT_NAME
+            )
 
             st.success("완료!")
+
             st.download_button(
                 "일일안전회의 PPT 다운로드",
                 ppt,
                 file_name=DAILY_OUTPUT_PPT_NAME,
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                key="daily_download_btn"
+                key="daily_download_btn",
+                use_container_width=True
             )
 
         except Exception as e:
@@ -2001,12 +2066,11 @@ def render_daily_safety_meeting():
                     except Exception:
                         pass
 
-    # 생성/다운로드 버튼과 다음 섹션이 모바일에서 시각적으로 겹치지 않도록 여백 확보
+    # 생성 버튼과 다음 섹션 사이 여백
     st.markdown("<div style='height:1.2rem'></div>", unsafe_allow_html=True)
     st.markdown("---")
     render_bad_photo_storage()
     st.markdown("---")
-
 
 def load_shared_notice() -> str:
     try:
