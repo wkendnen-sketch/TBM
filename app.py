@@ -61,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 8월 네이버 날씨 캡처 제거·안정화 버전"
+APP_VERSION = "26년 8월 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
