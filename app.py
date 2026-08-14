@@ -61,7 +61,7 @@ SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 8월 일일안전회의 고속분류 버전"
+APP_VERSION = "26년 8월 일일안전회의 최종 안정화 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -1166,7 +1166,7 @@ def extract_sort_number(text: str) -> int:
 
 
 
-DAILY_CLASSIFY_BATCH_SIZE = 8
+DAILY_CLASSIFY_BATCH_SIZE = 4
 
 DAILY_CLASSIFY_PROMPT = """
 다음 이미지들은 건설현장 일일안전회의용 사진이다.
@@ -1233,6 +1233,66 @@ def _daily_image_data_url(uploaded_file, max_dim: int = 1500, quality: int = 82)
     return f"data:image/jpeg;base64,{b64}"
 
 
+
+def _extract_retry_after_seconds(error_text: str, default: float = 2.5) -> float:
+    """OpenAI rate limit 응답의 'Please try again in Xs' 값을 추출."""
+    text = str(error_text or "")
+    m = re.search(r"try again in\s*([0-9.]+)\s*s", text, flags=re.IGNORECASE)
+    if m:
+        try:
+            return max(0.5, min(15.0, float(m.group(1)) + 0.4))
+        except Exception:
+            pass
+    return default
+
+
+def _post_openai_with_retry(
+    url: str,
+    headers: dict,
+    payload: dict,
+    timeout: int = 75,
+    max_retries: int = 6,
+):
+    """
+    TPM/RPM rate limit 자동 재시도.
+    사용자가 다시 버튼을 누르지 않아도 짧게 대기 후 이어서 처리한다.
+    """
+    last_response = None
+
+    for attempt in range(max_retries + 1):
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=timeout,
+        )
+        last_response = resp
+
+        if resp.status_code == 200:
+            return resp
+
+        body = resp.text or ""
+        is_rate_limit = (
+            resp.status_code == 429
+            or "rate_limit_exceeded" in body
+            or "Rate limit reached" in body
+        )
+
+        if not is_rate_limit:
+            return resp
+
+        if attempt >= max_retries:
+            return resp
+
+        wait_seconds = _extract_retry_after_seconds(
+            body,
+            default=min(8.0, 2.0 + attempt * 1.5)
+        )
+        time.sleep(wait_seconds)
+
+    return last_response
+
+
 def classify_material_files_with_gpt(api_key: str, material_files) -> List[dict]:
     results = []
 
@@ -1259,11 +1319,12 @@ def classify_material_files_with_gpt(api_key: str, material_files) -> List[dict]
             "input": [{"role": "user", "content": content}],
         }
 
-        resp = requests.post(
+        resp = _post_openai_with_retry(
             "https://api.openai.com/v1/responses",
             headers=headers,
-            json=payload,
+            payload=payload,
             timeout=75,
+            max_retries=6,
         )
         if resp.status_code != 200:
             raise Exception(f"일일안전회의 이미지 분류 API 오류: {resp.text}")
@@ -2174,6 +2235,12 @@ def render_daily_safety_meeting():
                         batch_files
                     )
                     classification_results.extend(batch_results)
+
+                    # 다음 배치에서 TPM 한도를 연속으로 밀어붙이지 않도록
+                    # 짧은 간격을 둔다. rate-limit 발생 시에는 위 재시도 로직이
+                    # 서버가 안내한 시간만큼 자동 대기 후 이어서 처리한다.
+                    if batch_end < total:
+                        time.sleep(1.2)
 
                 progress.progress(0.72, text="분류 완료 · PPT용 사진 변환 중...")
 
