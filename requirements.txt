@@ -1,8 +1,0 @@
-streamlit
-python-pptx
-Pillow
-google-genai
-playwright
-pillow-heif
-pytesseract
-openpyxl
