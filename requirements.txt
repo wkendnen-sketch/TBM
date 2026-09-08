@@ -1,0 +1,6 @@
+streamlit
+requests
+Pillow
+python-pptx
+pillow-heif
+openpyxl
