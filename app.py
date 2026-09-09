@@ -761,7 +761,15 @@ DAILY_CLASSIFY_PROMPT = """
 다음 이미지들은 건설현장 일일안전회의용 사진이다.
 각 이미지를 업로드 순서대로 판독해서 JSON 배열만 반환하라.
 
+중요 규칙:
+- 이미지 1개당 결과 객체를 정확히 1개만 반환한다.
+- 결과 객체에는 반드시 image_index를 포함한다.
+- image_index는 입력에 표시된 이미지 번호와 정확히 같아야 한다.
+- 같은 이미지를 두 번 반환하거나, 입력에 없는 이미지를 추가하지 않는다.
+- 판단이 불확실해도 객체를 생략하지 말고 기본값을 사용한다.
+
 각 항목:
+- image_index: 입력 이미지 번호(1부터 시작하는 정수)
 - work_type: "material" 또는 "high_risk"
 - company: 아래 업체 중 하나. 불확실하면 "기타업체"
 - number: 제목/상단 표기에서 순번이 확인되면 정수, 없으면 0
@@ -788,11 +796,11 @@ DAILY_CLASSIFY_PROMPT = """
 
 출력 예:
 [
-  {"work_type":"material","company":"원영건업","number":1},
-  {"work_type":"high_risk","company":"엠케이지","number":2}
+  {"image_index":1,"work_type":"material","company":"원영건업","number":1},
+  {"image_index":2,"work_type":"high_risk","company":"엠케이지","number":2}
 ]
 
-설명/코드블록 금지. 입력 이미지 개수와 출력 배열 개수는 반드시 같아야 한다.
+설명/코드블록 금지. 입력 이미지 수와 결과 객체 수는 반드시 정확히 같아야 한다.
 """
 
 
@@ -882,85 +890,146 @@ def _post_openai_with_retry(
     return last_response
 
 
+def _normalize_daily_classification(item: dict) -> dict:
+    if not isinstance(item, dict):
+        item = {}
+
+    work_type = str(item.get("work_type", "material")).strip().lower()
+    if work_type not in ("material", "high_risk"):
+        work_type = "material"
+
+    company = str(item.get("company", "기타업체")).strip() or "기타업체"
+    company = {
+        "유셀네트워크": "유셀네트웍스",
+        "우신": "우신에이스",
+    }.get(company, company)
+    if company not in COMPANY_ORDER and company != "기타업체":
+        company = "기타업체"
+
+    try:
+        number = int(item.get("number", 0) or 0)
+    except Exception:
+        number = 0
+
+    return {
+        "work_type": work_type,
+        "company": company,
+        "number": number,
+    }
+
+
+def _parse_daily_classification_response(raw: str, expected_count: int) -> Optional[List[dict]]:
+    """GPT 결과를 입력 이미지 번호 기준으로 검증/정렬한다.
+
+    정상일 때만 expected_count개 결과를 반환하고, 누락/중복/추가 결과가 있으면 None을 반환한다.
+    그러면 상위 함수가 해당 배치만 1장씩 재판독한다.
+    """
+    cleaned = str(raw or "").replace("```json", "").replace("```", "").strip()
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        cleaned = re.sub(r"[\x00-\x1F]+", " ", cleaned)
+        match = re.search(r"\[.*\]", cleaned, re.S)
+        try:
+            parsed = json.loads(match.group(0)) if match else []
+        except Exception:
+            return None
+
+    if not isinstance(parsed, list):
+        return None
+
+    indexed = {}
+    for pos, item in enumerate(parsed, start=1):
+        if not isinstance(item, dict):
+            return None
+        try:
+            image_index = int(item.get("image_index", pos))
+        except Exception:
+            image_index = pos
+
+        # 입력에 없는 번호나 중복 결과가 있으면 배치 결과 전체를 신뢰하지 않는다.
+        if image_index < 1 or image_index > expected_count or image_index in indexed:
+            return None
+        indexed[image_index] = _normalize_daily_classification(item)
+
+    if len(indexed) != expected_count:
+        return None
+
+    return [indexed[i] for i in range(1, expected_count + 1)]
+
+
+def _classify_material_batch_with_gpt(api_key: str, batch) -> Optional[List[dict]]:
+    expected_count = len(batch)
+    strict_prompt = (
+        DAILY_CLASSIFY_PROMPT
+        + f"\n\n이번 입력은 정확히 {expected_count}장이다. "
+          f"image_index 1부터 {expected_count}까지 각각 한 번씩만 반환하라. "
+          f"JSON 객체도 정확히 {expected_count}개여야 한다."
+    )
+
+    content = [{"type": "input_text", "text": strict_prompt}]
+    for i, f in enumerate(batch, start=1):
+        content.append({
+            "type": "input_text",
+            "text": f"이미지 {i} / 파일명: {f.name}",
+        })
+        content.append({
+            "type": "input_image",
+            "image_url": _daily_image_data_url(f),
+        })
+
+    headers = {
+        "Authorization": f"Bearer {api_key.strip()}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4o-mini",
+        "input": [{"role": "user", "content": content}],
+    }
+
+    resp = _post_openai_with_retry(
+        "https://api.openai.com/v1/responses",
+        headers=headers,
+        payload=payload,
+        timeout=75,
+        max_retries=6,
+    )
+    if resp.status_code != 200:
+        raise Exception(f"일일안전회의 이미지 분류 API 오류: {resp.text}")
+
+    raw = _extract_openai_output_text(resp.json())
+    return _parse_daily_classification_response(raw, expected_count)
+
+
 def classify_material_files_with_gpt(api_key: str, material_files) -> List[dict]:
+    """사진을 최대 4장씩 분류하되, GPT가 개수를 틀리면 그 배치만 1장씩 자동 재판독한다."""
     results = []
 
     for start in range(0, len(material_files), DAILY_CLASSIFY_BATCH_SIZE):
         batch = material_files[start:start + DAILY_CLASSIFY_BATCH_SIZE]
+        batch_results = _classify_material_batch_with_gpt(api_key, batch)
 
-        content = [{"type": "input_text", "text": DAILY_CLASSIFY_PROMPT}]
-        for i, f in enumerate(batch, start=1):
-            content.append({
-                "type": "input_text",
-                "text": f"이미지 {i} / 파일명: {f.name}"
-            })
-            content.append({
-                "type": "input_image",
-                "image_url": _daily_image_data_url(f)
-            })
+        if batch_results is None:
+            # GPT가 4장 입력에 5개 결과를 반환하는 등의 오류가 생기면
+            # 전체 작업을 실패시키지 않고 해당 4장만 한 장씩 재판독한다.
+            batch_results = []
+            for f in batch:
+                single_result = _classify_material_batch_with_gpt(api_key, [f])
+                if single_result:
+                    batch_results.append(single_result[0])
+                else:
+                    # 단일 판독까지 형식이 깨졌을 때도 PPT 생성을 중단하지 않는다.
+                    # 잘못 추정하는 것보다 안전하게 기본 분류로 넘긴다.
+                    batch_results.append({
+                        "work_type": "material",
+                        "company": "기타업체",
+                        "number": 0,
+                    })
+                time.sleep(0.35)
 
-        headers = {
-            "Authorization": f"Bearer {api_key.strip()}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": "gpt-4o-mini",
-            "input": [{"role": "user", "content": content}],
-        }
-
-        resp = _post_openai_with_retry(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            payload=payload,
-            timeout=75,
-            max_retries=6,
-        )
-        if resp.status_code != 200:
-            raise Exception(f"일일안전회의 이미지 분류 API 오류: {resp.text}")
-
-        data = resp.json()
-        raw = _extract_openai_output_text(data)
-        cleaned = str(raw or "").replace("```json", "").replace("```", "").strip()
-        try:
-            parsed = json.loads(cleaned)
-        except Exception:
-            match = re.search(r"\[.*\]", cleaned, re.S)
-            parsed = json.loads(match.group(0)) if match else []
-
-        if not isinstance(parsed, list) or len(parsed) != len(batch):
-            raise ValueError(
-                f"이미지 분류 개수 불일치: 입력 {len(batch)} / "
-                f"출력 {len(parsed) if isinstance(parsed, list) else 0}"
-            )
-
-        for item in parsed:
-            if not isinstance(item, dict):
-                item = {}
-
-            work_type = str(item.get("work_type", "material")).strip().lower()
-            if work_type not in ("material", "high_risk"):
-                work_type = "material"
-
-            company = str(item.get("company", "기타업체")).strip() or "기타업체"
-            company = {
-                "유셀네트워크": "유셀네트웍스",
-                "우신": "우신에이스",
-            }.get(company, company)
-
-            try:
-                number = int(item.get("number", 0) or 0)
-            except Exception:
-                number = 0
-
-            results.append({
-                "work_type": work_type,
-                "company": company,
-                "number": number,
-            })
+        results.extend(batch_results)
 
     return results
-
-
 
 
 def company_order_index(company: str) -> int:
