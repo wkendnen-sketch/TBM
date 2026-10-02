@@ -1183,11 +1183,12 @@ def set_target_text(
         run.font.color.rgb = font_color
 
 
-def add_picture_to_shape(slide, image_path, target_shape):
+def add_picture_to_shape(slide, image_path, target_shape, preserve_full_image: bool = False):
     """
     PHOTO_BOX에 사진을 넣을 때 회전/왜곡 금지.
     - 사진 비율 유지
-    - 박스는 꽉 채움(cover crop)
+    - 기본: 박스를 꽉 채움(cover crop)
+    - preserve_full_image=True: 원본 비율로 박스 안에 가운데 배치, 자르지 않음
     - crop만 적용하고 rotation은 항상 0
     """
     try:
@@ -1199,6 +1200,8 @@ def add_picture_to_shape(slide, image_path, target_shape):
         img_w, img_h = img.size
         img.close()
     except Exception:
+        if preserve_full_image:
+            raise ValueError("이미지를 읽지 못해 원본 비율로 삽입할 수 없습니다.")
         slide.shapes.add_picture(
             image_path,
             target_shape.left,
@@ -1215,6 +1218,24 @@ def add_picture_to_shape(slide, image_path, target_shape):
     box_h = float(target_shape.height)
     img_ratio = img_w / img_h
     box_ratio = box_w / box_h
+
+    if preserve_full_image:
+        scale = min(box_w / img_w, box_h / img_h)
+        picture_w = max(1, min(target_shape.width, int(round(img_w * scale))))
+        picture_h = max(1, min(target_shape.height, int(round(img_h * scale))))
+        pic = slide.shapes.add_picture(
+            image_path,
+            target_shape.left + (target_shape.width - picture_w) // 2,
+            target_shape.top + (target_shape.height - picture_h) // 2,
+            width=picture_w,
+            height=picture_h,
+        )
+        pic.rotation = 0
+        pic.crop_left = pic.crop_right = pic.crop_top = pic.crop_bottom = 0
+        # 여백에 플레이스홀더 문구가 보이지 않도록 비운다.
+        if getattr(target_shape, "has_text_frame", False):
+            target_shape.text_frame.clear()
+        return pic
 
     pic = slide.shapes.add_picture(
         image_path,
@@ -1334,7 +1355,9 @@ def clone_and_fill_material_slides(prs, template_slide, material_items: List[Mat
     created_ids = []
     for item in material_items:
         new_slide = duplicate_slide(prs, template_slide)
-        insert_image_to_placeholder(new_slide, TIME_BOX_TEXT, item.image_path)
+        insert_image_to_placeholder(
+            new_slide, TIME_BOX_TEXT, item.image_path, preserve_full_image=True
+        )
         created_ids.append(new_slide.slide_id)
     return created_ids
 
@@ -1426,7 +1449,9 @@ def fill_daily_slide(slide, item: DailySlideData, strict: bool = False):
         raise ValueError("TEXT_BOX_1 플레이스홀더를 찾지 못했습니다.")
 
 
-def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
+def insert_image_to_placeholder(
+    slide, placeholder_text: str, image_path: str, preserve_full_image: bool = False
+):
     target = find_text_target(slide, placeholder_text)
 
     if target is None:
@@ -1437,7 +1462,7 @@ def insert_image_to_placeholder(slide, placeholder_text: str, image_path: str):
     if kind != "shape":
         return
 
-    add_picture_to_shape(slide, image_path, obj)
+    add_picture_to_shape(slide, image_path, obj, preserve_full_image=preserve_full_image)
 
 
 
@@ -1509,12 +1534,14 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
 
 def build_daily_ppt(
     bad_items: List[DailySlideData],
-    material_items: List[MaterialWorkItem]
+    material_items: List[MaterialWorkItem],
+    hold_items: Optional[List[MaterialWorkItem]] = None,
 ) -> io.BytesIO:
     if not os.path.exists(DAILY_TEMPLATE_PPT):
         raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
 
     prs = Presentation(DAILY_TEMPLATE_PPT)
+    hold_items = hold_items or []
 
     if len(prs.slides) >= 1:
         fill_date_box(prs.slides[0])
@@ -1525,21 +1552,40 @@ def build_daily_ppt(
     # 템플릿 기준 슬라이드 찾기
     bad_template_idx = find_slide_index_by_text(prs, DAILY_PHOTO_BOX_TEXT)
     material_template_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
+    hold_template_idx = find_slide_index_by_text(prs, HOLD_POINT_TEXT)
+    hold_photo_text = TIME_BOX_TEXT
+    # 홀드포인트 전용 사진 틀이 있으면 사용하고, 없으면 기존 자료용 틀을 재사용한다.
+    if hold_template_idx is not None:
+        hold_slide = prs.slides[hold_template_idx]
+        for marker in (TIME_BOX_TEXT, DAILY_PHOTO_BOX_TEXT, PHOTO_BOX_TEXT):
+            target = find_text_target(hold_slide, marker)
+            if target is not None and target[0] == "shape":
+                hold_photo_text = marker
+                break
+        else:
+            hold_template_idx = None
+    if hold_template_idx is None:
+        hold_template_idx = material_template_idx
 
     if bad_items and bad_template_idx is None:
         raise ValueError("부적합사진 기준 슬라이드(PHOTO_BOX_1)를 찾지 못했습니다.")
 
     if material_items and material_template_idx is None:
-        raise ValueError("자재입고/고위험 기준 슬라이드(TIME_BOX_1)를 찾지 못했습니다.")
+        raise ValueError("자재입고 기준 슬라이드(TIME_BOX_1)를 찾지 못했습니다.")
+    if hold_items and hold_template_idx is None:
+        raise ValueError("홀드포인트 사진 기준 슬라이드 또는 TIME_BOX_1을 찾지 못했습니다.")
 
     bad_template_slide = prs.slides[bad_template_idx] if bad_template_idx is not None else None
     material_template_slide = prs.slides[material_template_idx] if material_template_idx is not None else None
+    hold_template_slide = prs.slides[hold_template_idx] if hold_template_idx is not None else None
 
     bad_template_id = bad_template_slide.slide_id if bad_template_slide is not None else None
     material_template_id = material_template_slide.slide_id if material_template_slide is not None else None
+    hold_template_id = hold_template_slide.slide_id if hold_template_slide is not None else None
 
     created_bad_ids = []
     created_material_ids = []
+    created_hold_ids = []
 
     if bad_template_slide is not None:
         created_bad_ids = clone_and_fill_bad_slides(prs, bad_template_slide, bad_items)
@@ -1547,8 +1593,29 @@ def build_daily_ppt(
     if material_template_slide is not None:
         created_material_ids = clone_and_fill_material_slides(prs, material_template_slide, material_items)
 
+    if hold_template_slide is not None:
+        for item in hold_items:
+            new_slide = duplicate_slide(prs, hold_template_slide)
+            insert_image_to_placeholder(
+                new_slide, hold_photo_text, item.image_path, preserve_full_image=True
+            )
+            # 공용 자재입고 틀을 사용하더라도 홀드포인트 제목으로 표시한다.
+            for shape in iter_all_shapes(new_slide.shapes):
+                if getattr(shape, "has_text_frame", False):
+                    for paragraph in shape.text_frame.paragraphs:
+                        for run in paragraph.runs:
+                            run.text = run.text.replace("자재입고", "홀드포인트")
+            text_target = find_text_target(new_slide, DAILY_TEXT_BOX_TEXT)
+            if text_target is not None:
+                set_target_text(text_target, "", 28)
+            created_hold_ids.append(new_slide.slide_id)
+
     # 원본 기준 슬라이드는 빈 템플릿이므로 제거. 같은 슬라이드 중복 제거 방지.
-    for sid in sorted({x for x in [bad_template_id, material_template_id] if x is not None}, reverse=True):
+    empty_template_ids = [bad_template_id, material_template_id]
+    if not hold_items and hold_template_slide is not None:
+        # 자료가 없는 전용 사진 틀도 제거하되, 사진 틀이 없는 HOLD POINT 제목은 유지한다.
+        empty_template_ids.append(hold_template_id)
+    for sid in sorted({x for x in empty_template_ids if x is not None}, reverse=True):
         delete_slide_by_id(prs, sid)
 
     # 동적 슬라이드를 명일 작업내용 발표 앞에 배치.
@@ -1575,6 +1642,19 @@ def build_daily_ppt(
     for sid in desired_dynamic_ids:
         move_slide_by_id(prs, sid, insert_at)
         insert_at += 1
+
+    # 전용 홀드포인트 구간에 자료를 넣는다. 제목 슬라이드만 있는 경우 바로 뒤에 추가한다.
+    if created_hold_ids:
+        hold_index = get_slide_index_by_id(prs, hold_template_id)
+        if hold_index is not None and hold_template_idx != material_template_idx:
+            insert_at = hold_index
+            delete_slide_by_id(prs, hold_template_id)
+        else:
+            hold_index = find_slide_index_by_text(prs, HOLD_POINT_TEXT)
+            insert_at = hold_index + 1 if hold_index is not None else insert_at
+        for sid in created_hold_ids:
+            move_slide_by_id(prs, sid, insert_at)
+            insert_at += 1
 
     out = io.BytesIO()
     prs.save(out)
@@ -1757,7 +1837,7 @@ def render_daily_safety_meeting():
             bad_text_values.append(text_value)
 
     material_files = st.file_uploader(
-        "자재입고 및 고위험작업",
+        "자재입고",
         accept_multiple_files=True,
         type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
         key="daily_material_uploader"
@@ -1766,11 +1846,11 @@ def render_daily_safety_meeting():
     if material_files:
         if len(material_files) > MAX_DAILY_FILES_SOFT_WARN:
             st.warning(
-                f"자재입고 및 고위험작업 사진이 {len(material_files)}장입니다. "
-                "GPT 이미지 분류는 생성 버튼을 누른 뒤 실행합니다."
+                f"자재입고 사진이 {len(material_files)}장입니다. "
+                "업체명·순서 판독은 생성 버튼을 누른 뒤 실행합니다."
             )
 
-        st.markdown("#### 자재입고 및 고위험작업")
+        st.markdown("#### 자재입고")
 
         # 여기서는 OCR을 하지 않는다. 파일명/간단 미리보기만 보여준다.
         for idx, f in enumerate(material_files):
@@ -1782,7 +1862,30 @@ def render_daily_safety_meeting():
                     st.caption("사진")
             with c2:
                 st.caption(f"{idx + 1}. {f.name}")
-                st.caption("분류·업체명·순서는 PPT 생성 시 GPT로 자동 판독")
+                st.caption("자재입고로 반영 · 업체명·순서는 PPT 생성 시 자동 판독")
+
+    hold_files = st.file_uploader(
+        "홀드포인트 자료 (25대 고위험작업)",
+        accept_multiple_files=True,
+        type=["jpg", "png", "jpeg", "webp", "heic", "heif", "mpo"],
+        key="daily_hold_uploader"
+    )
+    if hold_files:
+        if len(hold_files) > MAX_DAILY_FILES_SOFT_WARN:
+            st.warning(f"홀드포인트 자료가 {len(hold_files)}장입니다. 생성 시 자동 축소 처리합니다.")
+        st.markdown("#### 홀드포인트")
+        for idx, f in enumerate(hold_files):
+            c1, c2 = st.columns([1, 4])
+            with c1:
+                try:
+                    st.image(f, width=110)
+                except Exception:
+                    st.caption("사진")
+            with c2:
+                st.caption(f"{idx + 1}. {f.name}")
+                st.caption("홀드포인트로 반영 · 이미지 전체를 원본 비율로 삽입")
+
+    st.caption("부적합사진·자재입고·홀드포인트는 각각 선택 업로드입니다. 한 종류만 올려도 PPT를 생성할 수 있습니다.")
 
     # 업로더 바로 다음에 버튼을 즉시 렌더링한다.
     st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
@@ -1799,6 +1902,7 @@ def render_daily_safety_meeting():
     if daily_create_clicked:
         bad_items = []
         material_items = []
+        hold_items = []
         temp_paths = []
 
         try:
@@ -1828,73 +1932,83 @@ def render_daily_safety_meeting():
                             )
                         )
 
-            # 2. 자재입고/25대 고위험 고속 분류
-            if material_files:
-                if "GPT_API_KEY" not in st.secrets:
-                    raise ValueError("Secrets에 GPT_API_KEY 설정 필요")
+            # 2. 업로더 구분을 그대로 유지하고 업체명·순서만 자동 판독한다.
+            upload_groups = [
+                ("자재입고", material_files or [], "material", material_items),
+                ("홀드포인트", hold_files or [], "high_risk", hold_items),
+            ]
+            api_key = ""
+            if material_files or hold_files:
+                try:
+                    api_key = str(st.secrets.get("GPT_API_KEY", "")).strip()
+                except Exception:
+                    pass
+                if not api_key:
+                    st.warning("업체명 자동 판독 설정이 없어 각 자료를 업로드 순서대로 반영합니다.")
 
-                total = len(material_files)
-                progress = st.progress(0, text="사진 분류 준비 중...")
-
+            for label, files, work_type, target_items in upload_groups:
+                if not files:
+                    continue
+                total = len(files)
+                progress = st.progress(0, text=f"{label} 사진 준비 중...")
                 classification_results = []
-
                 for batch_start in range(0, total, DAILY_CLASSIFY_BATCH_SIZE):
                     batch_end = min(batch_start + DAILY_CLASSIFY_BATCH_SIZE, total)
+                    batch_files = files[batch_start:batch_end]
                     progress.progress(
-                        batch_start / max(1, total),
-                        text=f"사진 분류 중... {batch_start + 1}~{batch_end}/{total}"
+                        0.7 * batch_start / total,
+                        text=f"{label} 업체명·순서 판독 중... {batch_start + 1}~{batch_end}/{total}"
                     )
-                    batch_files = material_files[batch_start:batch_end]
-                    batch_results = classify_material_files_with_gpt(
-                        st.secrets["GPT_API_KEY"],
-                        batch_files
-                    )
+                    batch_results = None
+                    if api_key:
+                        try:
+                            batch_results = classify_material_files_with_gpt(api_key, batch_files)
+                        except Exception:
+                            st.warning(
+                                f"{label} {batch_start + 1}~{batch_end}번 자동 판독 실패: "
+                                "해당 사진은 업로드 순서대로 반영합니다."
+                            )
+                    if batch_results is None or len(batch_results) != len(batch_files):
+                        batch_results = [
+                            {"company": "기타업체", "number": 0}
+                            for _ in batch_files
+                        ]
                     classification_results.extend(batch_results)
-
-                    # 다음 배치에서 TPM 한도를 연속으로 밀어붙이지 않도록
-                    # 짧은 간격을 둔다. rate-limit 발생 시에는 위 재시도 로직이
-                    # 서버가 안내한 시간만큼 자동 대기 후 이어서 처리한다.
-                    if batch_end < total:
+                    if api_key and batch_end < total:
                         time.sleep(1.2)
 
-                progress.progress(0.72, text="분류 완료 · PPT용 사진 변환 중...")
-
-                for idx, (f, cls) in enumerate(zip(material_files, classification_results)):
+                for idx, f in enumerate(files):
+                    cls = classification_results[idx]
                     suffix = os.path.splitext(f.name)[1].lower() or ".jpg"
-
                     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                         tmp.write(f.getbuffer())
-                        material_original_path = tmp.name
-                        temp_paths.append(material_original_path)
-
-                    material_jpg_path = convert_to_jpg(
-                        material_original_path,
+                        original_path = tmp.name
+                        temp_paths.append(original_path)
+                    jpg_path = convert_to_jpg(
+                        original_path,
                         max_size=DAILY_IMAGE_MAX_SIZE,
                         quality=DAILY_IMAGE_QUALITY
                     )
-                    temp_paths.append(material_jpg_path)
-
-                    material_items.append(
+                    temp_paths.append(jpg_path)
+                    target_items.append(
                         MaterialWorkItem(
-                            image_path=material_jpg_path,
+                            image_path=jpg_path,
                             upload_index=idx,
-                            work_type=cls["work_type"],
+                            work_type=work_type,
                             company=cls["company"],
                             number=cls["number"],
                         )
                     )
-
                     progress.progress(
-                        0.72 + 0.25 * ((idx + 1) / max(1, total)),
-                        text=f"PPT용 사진 준비 중... {idx + 1}/{total}"
+                        0.7 + 0.3 * (idx + 1) / total,
+                        text=f"{label} PPT용 사진 준비 중... {idx + 1}/{total}"
                     )
 
-                progress.progress(1.0, text="분류 및 사진 준비 완료")
-
-            # 3. 정렬 + PPT 생성
+            # 3. 자료별 정렬 + PPT 생성. 빈 업로드 그룹은 건너뛴다.
             with st.spinner("PPT 생성 중..."):
                 sorted_material_items = sort_material_work_items(material_items)
-                ppt = build_daily_ppt(bad_items, sorted_material_items)
+                sorted_hold_items = sort_material_work_items(hold_items)
+                ppt = build_daily_ppt(bad_items, sorted_material_items, sorted_hold_items)
 
             save_generated_ppt_to_bad_photo_storage(
                 ppt,
