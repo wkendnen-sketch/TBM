@@ -48,6 +48,8 @@ BAD_PHOTO_DIR = os.path.join(BASE_DIR, "bad_photo_upload")
 SHARED_NOTICE_FILE = os.path.join(BASE_DIR, "shared_notice.md")
 SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 
+OPENAI_MODEL = "gpt-6-luna"
+
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
@@ -657,7 +659,8 @@ def translate_batch_with_gpt(api_key: str, korean_list: List[str]):
     }
 
     payload = {
-        "model": "gpt-4o-mini",
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "none"},
         "input": prompt
     }
 
@@ -983,7 +986,8 @@ def _classify_material_batch_with_gpt(api_key: str, batch) -> Optional[List[dict
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "gpt-4o-mini",
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "none"},
         "input": [{"role": "user", "content": content}],
     }
 
@@ -1708,11 +1712,12 @@ def render_tbm_input_area():
 
     temp_paths = []
     try:
-        if "GPT_API_KEY" not in st.secrets:
-            raise ValueError("Secrets에 GPT_API_KEY 설정 필요")
+        nonempty_indices = [i for i, text in enumerate(ko_inputs) if text.strip()]
+        if len(nonempty_indices) != len(ko_inputs):
+            st.warning("빈 한국어 문구가 있습니다. 모든 슬라이드 문구를 입력하세요.")
 
-        if any(not x.strip() for x in ko_inputs):
-            raise ValueError("빈 한국어 문구가 있습니다. 모든 슬라이드 문구를 입력하세요.")
+        if nonempty_indices and "GPT_API_KEY" not in st.secrets:
+            raise ValueError("Secrets에 GPT_API_KEY 설정 필요")
 
         slide_inputs = []
 
@@ -1739,16 +1744,17 @@ def render_tbm_input_area():
                     )
                 )
 
-        with st.spinner("번역 중..."):
-            translations = translate_all_with_gpt(
-                st.secrets["GPT_API_KEY"],
-                ko_inputs
-            )
+        if nonempty_indices:
+            with st.spinner("번역 중..."):
+                translations = translate_all_with_gpt(
+                    st.secrets["GPT_API_KEY"],
+                    [ko_inputs[i].strip() for i in nonempty_indices]
+                )
 
-            for s, tr in zip(slide_inputs, translations):
-                s.zh = tr["zh"]
-                s.vi = tr["vi"]
-                s.my = tr["my"]
+                for i, tr in zip(nonempty_indices, translations):
+                    slide_inputs[i].zh = tr["zh"]
+                    slide_inputs[i].vi = tr["vi"]
+                    slide_inputs[i].my = tr["my"]
 
         with st.spinner("PPT 생성 중..."):
             ppt = build_ppt(slide_inputs)
@@ -1815,7 +1821,8 @@ def render_daily_safety_meeting():
         st.markdown("#### 부적합사진")
 
         for idx, f in enumerate(bad_files):
-            with st.expander(f"부적합사진 #{idx + 1}", expanded=False):
+            st.markdown(f"**부적합사진 #{idx + 1}**")
+            with st.container():
                 c1, c2 = st.columns([1, 4])
 
                 with c1:
@@ -2502,7 +2509,8 @@ def extract_heat_meter_values_with_gpt(api_key: str, image_path: str) -> List[di
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "gpt-4o-mini",
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "none"},
         "input": [{"role": "user", "content": content}],
     }
 
@@ -2617,7 +2625,8 @@ def extract_heat_records_with_gpt(api_key: str, image_path: str) -> List[dict]:
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "gpt-4o-mini",
+        "model": OPENAI_MODEL,
+        "reasoning": {"effort": "none"},
         "input": [
             {
                 "role": "user",
