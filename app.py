@@ -49,6 +49,9 @@ SHARED_NOTICE_FILE = os.path.join(BASE_DIR, "shared_notice.md")
 SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 
 OPENAI_MODEL = "gpt-6-luna"
+DAILY_WEATHER_URL = "https://weather.naver.com/map/02370550?visualMapType=maple"
+DAILY_WEATHER_REGION = "오산시 세마동"
+DAILY_WEATHER_BOX = "WEATHER_BOX_1"
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
@@ -1536,27 +1539,98 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     return out
 
 
+def capture_daily_weather() -> bytes:
+    """예보 → 강수 선택 후 예보 시각·지도 강수값이 로딩되면 캡처한다."""
+    try:
+        from playwright.sync_api import sync_playwright, expect
+    except ImportError as exc:
+        raise RuntimeError("날씨 자동 캡처용 playwright 설치가 필요합니다. 설치안내.txt를 확인하세요.") from exc
+
+    with sync_playwright() as pw:
+        executable = shutil.which("chromium") or shutil.which("chromium-browser")
+        launch_options = {"headless": True, "timeout": 20000}
+        if executable:
+            launch_options["executable_path"] = executable
+        browser = pw.chromium.launch(**launch_options)
+        try:
+            page = browser.new_page(
+                viewport={"width": 1440, "height": 1000},
+                device_scale_factor=1,
+                locale="ko-KR",
+                timezone_id="Asia/Seoul",
+            )
+            page.set_default_timeout(20000)
+            page.goto(DAILY_WEATHER_URL, wait_until="domcontentloaded", timeout=30000)
+            page.get_by_role("button", name="예보", exact=True).click()
+            page.get_by_role("button", name="강수", exact=True).click()
+            selected = page.get_by_role("button", name="예보 강수", exact=True)
+            expect(selected).to_have_attribute("aria-pressed", "true", timeout=15000)
+            expect(page.get_by_role("slider")).to_contain_text(
+                re.compile(r"\d{1,2}:\d{2}"), timeout=30000
+            )
+            expect(page.get_by_role("heading", level=3, name=re.compile(r"강수.*오산시\s*세마동"))).to_be_visible(timeout=30000)
+            expect(page.get_by_role("tabpanel").first).to_contain_text("mm", timeout=30000)
+            page.wait_for_function("""() => Array.from(document.images).filter(img => {
+                const r = img.getBoundingClientRect();
+                return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
+            }).every(img => img.complete && img.naturalWidth > 0)""", timeout=15000)
+            # 지도는 위치 권한을 요청하지 않고 오산시 세마동 화면을 사용한다.
+            # 예보 시간축·범례·강수 버튼까지 포함해 캡처한다.
+            return page.screenshot(type="png", full_page=False, animations="disabled")
+        finally:
+            browser.close()
+
+
+def fill_daily_weather_slide(prs, image_path: str):
+    """2번 슬라이드의 날씨 틀만 변경하고 이미지 원본 비율을 보존한다."""
+    if len(prs.slides) < 2:
+        raise ValueError("날씨를 넣을 2번 슬라이드가 없습니다.")
+    slide = prs.slides[1]
+    target = find_text_target(slide, DAILY_WEATHER_BOX)
+    if target is not None and target[0] == "shape":
+        shape = target[1]
+    else:
+        # 기존 날씨 캡처 사진으로 틀을 바꾼 템플릿도 지원한다.
+        pictures = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
+        if not pictures:
+            raise ValueError("2번 슬라이드에 WEATHER_BOX_1 도형 또는 날씨 사진이 필요합니다.")
+        shape = max(pictures, key=lambda s: s.width * s.height)
+    add_picture_to_shape(slide, image_path, shape, preserve_full_image=True)
+    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+        shape._element.getparent().remove(shape._element)
+
+
+def find_daily_template_index(prs, marker, protected_ids):
+    for idx, slide in enumerate(prs.slides):
+        if slide.slide_id not in protected_ids and slide_has_text(slide, marker):
+            return idx
+    return None
+
+
 def build_daily_ppt(
     bad_items: List[DailySlideData],
     material_items: List[MaterialWorkItem],
     hold_items: Optional[List[MaterialWorkItem]] = None,
+    weather_image_path: Optional[str] = None,
 ) -> io.BytesIO:
     if not os.path.exists(DAILY_TEMPLATE_PPT):
         raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
 
     prs = Presentation(DAILY_TEMPLATE_PPT)
     hold_items = hold_items or []
+    # 템플릿 원래 6·7번 슬라이드는 제목·사진·도형을 그대로 보존한다.
+    protected_ids = {prs.slides[i].slide_id for i in (5, 6) if i < len(prs.slides)}
 
     if len(prs.slides) >= 1:
         fill_date_box(prs.slides[0])
 
-    # 네이버 날씨 자동 캡처 기능은 제거됨.
-    # 템플릿의 날씨 관련 슬라이드/영역은 원본 상태 그대로 유지한다.
+    if weather_image_path:
+        fill_daily_weather_slide(prs, weather_image_path)
 
     # 템플릿 기준 슬라이드 찾기
-    bad_template_idx = find_slide_index_by_text(prs, DAILY_PHOTO_BOX_TEXT)
-    material_template_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
-    hold_template_idx = find_slide_index_by_text(prs, HOLD_POINT_TEXT)
+    bad_template_idx = find_daily_template_index(prs, DAILY_PHOTO_BOX_TEXT, protected_ids)
+    material_template_idx = find_daily_template_index(prs, TIME_BOX_TEXT, protected_ids)
+    hold_template_idx = find_daily_template_index(prs, HOLD_POINT_TEXT, protected_ids)
     hold_photo_text = TIME_BOX_TEXT
     # 홀드포인트 전용 사진 틀이 있으면 사용하고, 없으면 기존 자료용 틀을 재사용한다.
     if hold_template_idx is not None:
@@ -1894,6 +1968,15 @@ def render_daily_safety_meeting():
 
     st.caption("부적합사진·자재입고·홀드포인트는 각각 선택 업로드입니다. 한 종류만 올려도 PPT를 생성할 수 있습니다.")
 
+    st.markdown("#### 날씨")
+    st.caption("PPT 생성 시 오산시 세마동 지도에서 예보 → 강수를 선택해 2번 슬라이드를 자동 갱신합니다.")
+    weather_upload = st.file_uploader(
+        "날씨 캡처 직접 업로드 (선택)",
+        type=["jpg", "jpeg", "png", "webp"],
+        key="daily_weather_uploader",
+        help="업로드하면 자동 캡처 대신 이 이미지를 사용합니다. 자동 캡처 실패 시에도 이용할 수 있습니다.",
+    )
+
     # 업로더 바로 다음에 버튼을 즉시 렌더링한다.
     st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
@@ -1913,6 +1996,25 @@ def render_daily_safety_meeting():
         temp_paths = []
 
         try:
+            # 날씨부터 확인해 캡처 실패 시 불필요한 GPT 판독 비용을 피한다.
+            with st.spinner("날씨 강수 예보 준비 중..."):
+                if weather_upload is not None:
+                    weather_bytes = weather_upload.getvalue()
+                else:
+                    try:
+                        weather_bytes = capture_daily_weather()
+                    except Exception as exc:
+                        st.warning(f"날씨 자동 캡처 실패: {exc}")
+                        raise ValueError(
+                            "네이버 날씨 예보 → 강수 화면을 직접 캡처해 '날씨 캡처 직접 업로드'에 올린 뒤 다시 생성하세요."
+                        ) from exc
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                    tmp.write(weather_bytes)
+                    weather_image_path = tmp.name
+                    temp_paths.append(weather_image_path)
+                # 최신 템플릿의 날씨 틀과 업로드 이미지도 판독 전에 검증한다.
+                fill_daily_weather_slide(Presentation(DAILY_TEMPLATE_PPT), weather_image_path)
+
             # 1. 부적합사진 변환
             if bad_files:
                 with st.spinner("부적합사진 처리 중..."):
@@ -2015,7 +2117,10 @@ def render_daily_safety_meeting():
             with st.spinner("PPT 생성 중..."):
                 sorted_material_items = sort_material_work_items(material_items)
                 sorted_hold_items = sort_material_work_items(hold_items)
-                ppt = build_daily_ppt(bad_items, sorted_material_items, sorted_hold_items)
+                ppt = build_daily_ppt(
+                    bad_items, sorted_material_items, sorted_hold_items,
+                    weather_image_path=weather_image_path,
+                )
 
             save_generated_ppt_to_bad_photo_storage(
                 ppt,
