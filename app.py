@@ -3977,6 +3977,12 @@ def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     hide_streamlit_ui()
 
+    # The Android app uses a dedicated uploader and verifies the saved file hash.
+    if st.query_params.get("mobile_upload") == "1":
+        from mobile_upload import render_mobile_upload
+        render_mobile_upload(BAD_PHOTO_DIR, BAD_PHOTO_LIMIT_BYTES, cleanup_old_bad_photo_files)
+        return
+
     render_app_title()
 
     render_daily_safety_meeting()
