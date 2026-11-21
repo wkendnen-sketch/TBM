@@ -14,7 +14,7 @@ import tempfile
 from copy import deepcopy, copy
 from dataclasses import dataclass
 from typing import List, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 
 import requests
@@ -49,9 +49,6 @@ SHARED_NOTICE_FILE = os.path.join(BASE_DIR, "shared_notice.md")
 SHARED_NOTICE_META_FILE = os.path.join(BASE_DIR, "shared_notice_meta.json")
 
 OPENAI_MODEL = "gpt-6-luna"
-DAILY_WEATHER_URL = "https://weather.naver.com/map/02370550?visualMapType=maple"
-DAILY_WEATHER_REGION = "오산시 세마동"
-DAILY_WEATHER_BOX = "WEATHER_BOX_1"
 
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
@@ -1539,98 +1536,27 @@ def build_ppt(slide_data_list: List[SlideData]) -> io.BytesIO:
     return out
 
 
-def capture_daily_weather() -> bytes:
-    """예보 → 강수 선택 후 예보 시각·지도 강수값이 로딩되면 캡처한다."""
-    try:
-        from playwright.sync_api import sync_playwright, expect
-    except ImportError as exc:
-        raise RuntimeError("날씨 자동 캡처용 playwright 설치가 필요합니다. 설치안내.txt를 확인하세요.") from exc
-
-    with sync_playwright() as pw:
-        executable = shutil.which("chromium") or shutil.which("chromium-browser")
-        launch_options = {"headless": True, "timeout": 20000}
-        if executable:
-            launch_options["executable_path"] = executable
-        browser = pw.chromium.launch(**launch_options)
-        try:
-            page = browser.new_page(
-                viewport={"width": 1440, "height": 1000},
-                device_scale_factor=1,
-                locale="ko-KR",
-                timezone_id="Asia/Seoul",
-            )
-            page.set_default_timeout(20000)
-            page.goto(DAILY_WEATHER_URL, wait_until="domcontentloaded", timeout=30000)
-            page.get_by_role("button", name="예보", exact=True).click()
-            page.get_by_role("button", name="강수", exact=True).click()
-            selected = page.get_by_role("button", name="예보 강수", exact=True)
-            expect(selected).to_have_attribute("aria-pressed", "true", timeout=15000)
-            expect(page.get_by_role("slider")).to_contain_text(
-                re.compile(r"\d{1,2}:\d{2}"), timeout=30000
-            )
-            expect(page.get_by_role("heading", level=3, name=re.compile(r"강수.*오산시\s*세마동"))).to_be_visible(timeout=30000)
-            expect(page.get_by_role("tabpanel").first).to_contain_text("mm", timeout=30000)
-            page.wait_for_function("""() => Array.from(document.images).filter(img => {
-                const r = img.getBoundingClientRect();
-                return r.width > 0 && r.height > 0 && r.top < innerHeight && r.bottom > 0;
-            }).every(img => img.complete && img.naturalWidth > 0)""", timeout=15000)
-            # 지도는 위치 권한을 요청하지 않고 오산시 세마동 화면을 사용한다.
-            # 예보 시간축·범례·강수 버튼까지 포함해 캡처한다.
-            return page.screenshot(type="png", full_page=False, animations="disabled")
-        finally:
-            browser.close()
-
-
-def fill_daily_weather_slide(prs, image_path: str):
-    """2번 슬라이드의 날씨 틀만 변경하고 이미지 원본 비율을 보존한다."""
-    if len(prs.slides) < 2:
-        raise ValueError("날씨를 넣을 2번 슬라이드가 없습니다.")
-    slide = prs.slides[1]
-    target = find_text_target(slide, DAILY_WEATHER_BOX)
-    if target is not None and target[0] == "shape":
-        shape = target[1]
-    else:
-        # 기존 날씨 캡처 사진으로 틀을 바꾼 템플릿도 지원한다.
-        pictures = [s for s in slide.shapes if s.shape_type == MSO_SHAPE_TYPE.PICTURE]
-        if not pictures:
-            raise ValueError("2번 슬라이드에 WEATHER_BOX_1 도형 또는 날씨 사진이 필요합니다.")
-        shape = max(pictures, key=lambda s: s.width * s.height)
-    add_picture_to_shape(slide, image_path, shape, preserve_full_image=True)
-    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-        shape._element.getparent().remove(shape._element)
-
-
-def find_daily_template_index(prs, marker, protected_ids):
-    for idx, slide in enumerate(prs.slides):
-        if slide.slide_id not in protected_ids and slide_has_text(slide, marker):
-            return idx
-    return None
-
-
 def build_daily_ppt(
     bad_items: List[DailySlideData],
     material_items: List[MaterialWorkItem],
     hold_items: Optional[List[MaterialWorkItem]] = None,
-    weather_image_path: Optional[str] = None,
 ) -> io.BytesIO:
     if not os.path.exists(DAILY_TEMPLATE_PPT):
         raise FileNotFoundError(f"템플릿 파일이 없습니다: {DAILY_TEMPLATE_PPT}")
 
     prs = Presentation(DAILY_TEMPLATE_PPT)
     hold_items = hold_items or []
-    # 템플릿 원래 6·7번 슬라이드는 제목·사진·도형을 그대로 보존한다.
-    protected_ids = {prs.slides[i].slide_id for i in (5, 6) if i < len(prs.slides)}
 
     if len(prs.slides) >= 1:
         fill_date_box(prs.slides[0])
 
-    if weather_image_path:
-        fill_daily_weather_slide(prs, weather_image_path)
+    # 네이버 날씨 자동 캡처 기능은 제거됨.
+    # 템플릿의 날씨 관련 슬라이드/영역은 원본 상태 그대로 유지한다.
 
     # 템플릿 기준 슬라이드 찾기
-    bad_template_idx = find_daily_template_index(prs, DAILY_PHOTO_BOX_TEXT, protected_ids)
-    material_template_idx = find_daily_template_index(prs, TIME_BOX_TEXT, protected_ids)
-    hold_template_idx = find_daily_template_index(prs, HOLD_POINT_TEXT, protected_ids)
+    bad_template_idx = find_slide_index_by_text(prs, DAILY_PHOTO_BOX_TEXT)
+    material_template_idx = find_slide_index_by_text(prs, TIME_BOX_TEXT)
+    hold_template_idx = find_slide_index_by_text(prs, HOLD_POINT_TEXT)
     hold_photo_text = TIME_BOX_TEXT
     # 홀드포인트 전용 사진 틀이 있으면 사용하고, 없으면 기존 자료용 틀을 재사용한다.
     if hold_template_idx is not None:
@@ -1968,15 +1894,6 @@ def render_daily_safety_meeting():
 
     st.caption("부적합사진·자재입고·홀드포인트는 각각 선택 업로드입니다. 한 종류만 올려도 PPT를 생성할 수 있습니다.")
 
-    st.markdown("#### 날씨")
-    st.caption("PPT 생성 시 오산시 세마동 지도에서 예보 → 강수를 선택해 2번 슬라이드를 자동 갱신합니다.")
-    weather_upload = st.file_uploader(
-        "날씨 캡처 직접 업로드 (선택)",
-        type=["jpg", "jpeg", "png", "webp"],
-        key="daily_weather_uploader",
-        help="업로드하면 자동 캡처 대신 이 이미지를 사용합니다. 자동 캡처 실패 시에도 이용할 수 있습니다.",
-    )
-
     # 업로더 바로 다음에 버튼을 즉시 렌더링한다.
     st.markdown("<div style='height:0.35rem'></div>", unsafe_allow_html=True)
 
@@ -1996,25 +1913,6 @@ def render_daily_safety_meeting():
         temp_paths = []
 
         try:
-            # 날씨부터 확인해 캡처 실패 시 불필요한 GPT 판독 비용을 피한다.
-            with st.spinner("날씨 강수 예보 준비 중..."):
-                if weather_upload is not None:
-                    weather_bytes = weather_upload.getvalue()
-                else:
-                    try:
-                        weather_bytes = capture_daily_weather()
-                    except Exception as exc:
-                        st.warning(f"날씨 자동 캡처 실패: {exc}")
-                        raise ValueError(
-                            "네이버 날씨 예보 → 강수 화면을 직접 캡처해 '날씨 캡처 직접 업로드'에 올린 뒤 다시 생성하세요."
-                        ) from exc
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
-                    tmp.write(weather_bytes)
-                    weather_image_path = tmp.name
-                    temp_paths.append(weather_image_path)
-                # 최신 템플릿의 날씨 틀과 업로드 이미지도 판독 전에 검증한다.
-                fill_daily_weather_slide(Presentation(DAILY_TEMPLATE_PPT), weather_image_path)
-
             # 1. 부적합사진 변환
             if bad_files:
                 with st.spinner("부적합사진 처리 중..."):
@@ -2117,10 +2015,7 @@ def render_daily_safety_meeting():
             with st.spinner("PPT 생성 중..."):
                 sorted_material_items = sort_material_work_items(material_items)
                 sorted_hold_items = sort_material_work_items(hold_items)
-                ppt = build_daily_ppt(
-                    bad_items, sorted_material_items, sorted_hold_items,
-                    weather_image_path=weather_image_path,
-                )
+                ppt = build_daily_ppt(bad_items, sorted_material_items, sorted_hold_items)
 
             save_generated_ppt_to_bad_photo_storage(
                 ppt,
@@ -3973,6 +3868,340 @@ def render_heat_index_log():
     render_heat_completed_file_list()
 
 
+
+# ============================================================
+# 화면 캡처 이미지 임시보관함 (Ctrl+V 붙여넣기 → 서버 저장, 24시간 보관)
+# 기존 TBM/일일안전회의/부적합사진/체감온도 기능과 저장 공간을 분리한다.
+# ============================================================
+CAPTURE_IMAGE_DIR = os.path.join(BASE_DIR, "capture_image_storage")
+CAPTURE_IMAGE_EXPIRE_SECONDS = 24 * 60 * 60
+CAPTURE_IMAGE_MAX_SINGLE_BYTES = 10 * 1024 * 1024
+CAPTURE_IMAGE_MAX_TOTAL_BYTES = 200 * 1024 * 1024
+CAPTURE_COMPONENT_HTML = r'''<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+*{box-sizing:border-box}body{margin:0;padding:3px;font:14px/1.55 system-ui,-apple-system,"Malgun Gothic",sans-serif;color:#182639;background:transparent}
+#zone{outline:none;border:2px dashed #97b5e9;border-radius:14px;background:#f8fbff;padding:26px 14px;text-align:center;cursor:pointer;transition:background .2s,border-color .2s}
+#zone:hover,#zone:focus,#zone.drag{background:#eaf3ff;border-color:#326cd4}
+#mark{font-size:26px;display:block;margin-bottom:6px}strong{font-size:19px;color:#123d75}p{margin:4px 0;color:#4b617b}.kbd{display:inline-block;padding:2px 9px;border:1px solid #b7c7dd;border-bottom:3px solid #b7c7dd;border-radius:6px;background:white;font-weight:700;color:#214e85}
+button{border:1px solid #c1d1e8;border-radius:9px;background:#fff;color:#234c84;font-size:13px;font-weight:700;margin-top:12px;padding:8px 16px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
+#status{margin-top:8px;min-height:22px;font-size:13px;color:#2d597c;text-align:center}
+</style>
+</head>
+<body>
+<div id="zone" tabindex="0" role="button" aria-label="캡처 이미지를 붙여넣으려면 이 영역을 클릭한 뒤 Ctrl+V를 누르세요">
+<span id="mark">📋</span><strong>여기를 클릭하고 <span class="kbd">Ctrl + V</span></strong>
+<p>Win + Shift + S로 캡처한 사진을 붙여넣으면 서버에 PNG 파일로 저장됩니다.</p>
+<button id="readBtn" type="button">클립보드에서 붙여넣기</button>
+</div>
+<div id="status" role="status" aria-live="polite">이 영역을 한 번 클릭한 뒤 Ctrl+V를 눌러주세요.</div>
+<script>
+(function(){
+'use strict';
+const zone=document.getElementById('zone');
+const status=document.getElementById('status');
+const readBtn=document.getElementById('readBtn');
+let busy=false;
+let pendingId=null;
+let timeoutHandle=null;
+function send(type, data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
+function height(){send('streamlit:setFrameHeight',{height:document.documentElement.scrollHeight+8});}
+function note(msg){status.textContent=msg;height();}
+function makeId(){return String(Date.now())+'_'+Math.random().toString(36).slice(2);}
+function reset(msg){busy=false;pendingId=null;readBtn.disabled=false;if(timeoutHandle)clearTimeout(timeoutHandle);timeoutHandle=null;note(msg);}
+function submit(blob){
+ if(busy){note('이전 사진을 저장하는 중입니다. 잠시 기다려주세요.');return;}
+ if(!blob||!String(blob.type||'').startsWith('image/')){note('이미지가 없습니다. 먼저 화면을 캡처해주세요.');return;}
+ if(blob.size>10*1024*1024){note('한 장은 10MB까지만 저장할 수 있습니다.');return;}
+ busy=true;readBtn.disabled=true;note('사진을 서버에 저장하는 중...');
+ const id=makeId(); pendingId=id;
+ const reader=new FileReader();
+ reader.onerror=()=>reset('이미지를 읽지 못했습니다. 다시 시도해주세요.');
+ reader.onload=()=>{
+  const result=String(reader.result||'');
+  const comma=result.indexOf(',');
+  if(comma===-1){reset('이미지 데이터를 읽을 수 없습니다.');return;}
+  send('streamlit:setComponentValue',{value:{id:id,mime:blob.type||'image/png',data:result.slice(comma+1)}});
+  timeoutHandle=setTimeout(()=>{if(busy)reset('서버 응답이 없습니다. 저장 목록을 확인한 뒤 다시 시도해주세요.');},30000);
+ };
+ reader.readAsDataURL(blob);
+}
+zone.addEventListener('click',(e)=>{if(e.target!==readBtn){zone.focus();}});
+document.addEventListener('paste',(e)=>{
+ const items=e.clipboardData?.items||[];
+ let image=null;
+ for(const item of items){if(item.type&&item.type.startsWith('image/')){image=item.getAsFile();break;}}
+ if(!image&&e.clipboardData?.files?.length){for(const f of e.clipboardData.files){if(f.type.startsWith('image/')){image=f;break;}}}
+ if(image){e.preventDefault();submit(image);}else{note('클립보드에 이미지가 없습니다. Win + Shift + S로 캡처한 뒤 다시 붙여넣으세요.');}
+});
+readBtn.addEventListener('click',async(e)=>{
+ e.stopPropagation();
+ if(busy)return;
+ if(!navigator.clipboard?.read){note('브라우저에서 직접 읽기를 지원하지 않습니다. 영역 클릭 후 Ctrl+V를 이용하세요.');zone.focus();return;}
+ try{
+  const items=await navigator.clipboard.read();
+  for(const item of items){
+   const type=item.types.find(t=>t.startsWith('image/'));
+   if(type){submit(await item.getType(type));return;}
+  }
+  note('클립보드에 이미지가 없습니다.');
+ }catch(error){note('클립보드 접근이 차단되었습니다. 영역 클릭 후 Ctrl+V를 이용하세요.');zone.focus();}
+});
+zone.addEventListener('dragover',(e)=>{e.preventDefault();zone.classList.add('drag');});
+zone.addEventListener('dragleave',()=>zone.classList.remove('drag'));
+zone.addEventListener('drop',(e)=>{e.preventDefault();zone.classList.remove('drag');const f=Array.from(e.dataTransfer?.files||[]).find(f=>f.type.startsWith('image/'));if(f)submit(f);else note('이미지 파일을 끌어다 놓으세요.');});
+window.addEventListener('message',(event)=>{
+ if(event.data?.type!=='streamlit:render')return;
+ const ack=String(event.data.args?.ack||'');
+ if(pendingId&&ack===pendingId){reset('저장 처리 완료! 아래 이미지 목록에서 확인하세요.');}
+ height();
+});
+send('streamlit:componentReady',{apiVersion:1});
+window.addEventListener('load',height);
+height();
+})();
+</script>
+</body>
+</html>'''
+
+
+def cleanup_expired_capture_images():
+    """앱에 접속하거나 Streamlit 재실행 시 24시간이 지난 PNG를 정리한다."""
+    os.makedirs(CAPTURE_IMAGE_DIR, exist_ok=True)
+    now = time.time()
+    for name in os.listdir(CAPTURE_IMAGE_DIR):
+        if not name.startswith("capture_") or not name.endswith(".png"):
+            continue
+        path = os.path.join(CAPTURE_IMAGE_DIR, name)
+        try:
+            if os.path.isfile(path) and now - os.path.getmtime(path) >= CAPTURE_IMAGE_EXPIRE_SECONDS:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def list_capture_images():
+    cleanup_expired_capture_images()
+    files = []
+    for name in os.listdir(CAPTURE_IMAGE_DIR):
+        if not (name.startswith("capture_") and name.endswith(".png")):
+            continue
+        path = os.path.join(CAPTURE_IMAGE_DIR, name)
+        try:
+            if os.path.isfile(path):
+                files.append((name, path, os.path.getsize(path), os.path.getmtime(path)))
+        except OSError:
+            continue
+    files.sort(key=lambda item: item[3], reverse=True)
+    return files
+
+
+def save_pasted_capture_image(event):
+    """브라우저에서 붙여넣은 이미지의 유효성을 검사하고 안전한 PNG로 서버에 저장한다."""
+    if not isinstance(event, dict):
+        raise ValueError("올바르지 않은 붙여넣기 데이터입니다.")
+    encoded = event.get("data", "")
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("이미지 데이터가 없습니다.")
+    # base64는 원본 파일보다 약 1/3 크므로 문자열 단계에서도 업로드 한도 검사
+    if len(encoded) > (CAPTURE_IMAGE_MAX_SINGLE_BYTES * 4 // 3) + 128:
+        raise ValueError("이미지 크기는 한 장당 최대 10MB입니다.")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except Exception:
+        raise ValueError("클립보드 이미지 인코딩이 올바르지 않습니다.")
+    if not raw or len(raw) > CAPTURE_IMAGE_MAX_SINGLE_BYTES:
+        raise ValueError("이미지 크기는 한 장당 최대 10MB입니다.")
+
+    try:
+        with Image.open(io.BytesIO(raw)) as src:
+            src.verify()
+        with Image.open(io.BytesIO(raw)) as src:
+            if src.width * src.height > 30_000_000:
+                raise ValueError("이미지 해상도가 너무 큽니다 (3,000만 픽셀 제한).")
+            img = ImageOps.exif_transpose(src)
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+            buffer = io.BytesIO()
+            img.save(buffer, format="PNG", optimize=True)
+            png_bytes = buffer.getvalue()
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError("이미지 파일을 읽을 수 없습니다.")
+
+    if len(png_bytes) > CAPTURE_IMAGE_MAX_SINGLE_BYTES:
+        raise ValueError("PNG 변환 후 용량이 10MB를 초과했습니다.")
+    digest = hashlib.sha256(png_bytes).hexdigest()[:14]
+    existing = list_capture_images()
+    # 같은 캡처를 여러 번 붙여넣어도 중복 저장하지 않는다.
+    for name, path, size, _ in existing:
+        if name.endswith(f"_{digest}.png") and size == len(png_bytes):
+            return name, False
+
+    total = sum(size for _, _, size, _ in existing)
+    if total + len(png_bytes) > CAPTURE_IMAGE_MAX_TOTAL_BYTES:
+        raise ValueError("임시보관함 총 용량 200MB를 초과했습니다. 기존 사진을 삭제해주세요.")
+
+    stamp = datetime.now(tz=timezone(timedelta(hours=9))).strftime("%Y%m%d_%H%M%S_%f")[:-3]
+    filename = f"capture_{stamp}_{digest}.png"
+    dest = os.path.join(CAPTURE_IMAGE_DIR, filename)
+    # 도중에 중단되어도 손상된 PNG가 보이지 않도록 임시파일을 먼저 작성
+    tmp = dest + ".tmp"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(png_bytes)
+        os.replace(tmp, dest)
+    finally:
+        if os.path.isfile(tmp):
+            os.remove(tmp)
+    return filename, True
+
+
+def get_capture_paste_component():
+    """별도 Github 파일 없이 app.py 하나만으로 클립보드 컴포넌트를 사용한다."""
+    import streamlit.components.v1 as components
+
+    # 컴포넌트는 웹 서버가 제공할 index.html이 필요하므로 /tmp에 자동 생성
+    component_dir = os.path.join(tempfile.gettempdir(), "hec_capture_paste_component_v1")
+    os.makedirs(component_dir, exist_ok=True)
+    html_path = os.path.join(component_dir, "index.html")
+    if not os.path.isfile(html_path) or open(html_path, "r", encoding="utf-8").read() != CAPTURE_COMPONENT_HTML:
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(CAPTURE_COMPONENT_HTML)
+    return components.declare_component("hec_capture_paste", path=component_dir)
+
+
+def make_capture_zip(files):
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=3) as archive:
+        for name, path, _, _ in files:
+            try:
+                archive.write(path, arcname=name)
+            except OSError:
+                continue
+    return out.getvalue()
+
+
+def render_capture_image_storage():
+    """전체 웹앱의 맨 하단에 화면 캡처 임시보관함을 배치."""
+    st.markdown("---")
+    st.markdown("### 📋 캡처 이미지 임시보관함")
+    st.caption("화면 캡처 → 붙여넣기 → PNG 자동 저장 · 저장 시점부터 24시간 보관")
+
+    # 옵션: Streamlit Secrets에 CAPTURE_STORAGE_PIN을 지정하면 이 구역만 접근 제한
+    try:
+        storage_pin = str(st.secrets.get("CAPTURE_STORAGE_PIN", "") or "")
+    except Exception:
+        storage_pin = ""
+    if storage_pin:
+        entered_pin = st.text_input("임시보관함 비밀번호", type="password", key="capture_storage_pin_input")
+        if entered_pin != storage_pin:
+            st.info("사진을 보거나 붙여넣으려면 비밀번호를 입력하세요.")
+            return
+    else:
+        st.caption("주의: 별도 비밀번호를 설정하지 않으면 앱 방문자 누구나 보관된 이미지를 확인·삭제할 수 있습니다.")
+
+    files = list_capture_images()
+    used_bytes = sum(item[2] for item in files)
+    st.caption(f"저장 {len(files)}장  |  사용량 {format_size(used_bytes)} / 200MB  |  개별 이미지 최대 10MB")
+    st.markdown("**① 붙여넣기 영역**")
+    try:
+        paste = get_capture_paste_component()
+        pasted_event = paste(
+            ack=st.session_state.get("capture_paste_last_id", ""),
+            key="capture_paste_component_widget",
+            default=None,
+        )
+    except Exception as exc:
+        st.error(f"붙여넣기 영역을 열지 못했습니다: {exc}")
+        return
+
+    if isinstance(pasted_event, dict) and pasted_event.get("id"):
+        event_id = str(pasted_event["id"])
+        if event_id != st.session_state.get("capture_paste_last_id", ""):
+            try:
+                filename, is_new = save_pasted_capture_image(pasted_event)
+                st.session_state["capture_paste_result"] = (
+                    "success", f"저장 완료: {filename}" if is_new else "이미 보관 중인 사진입니다. 중복 저장하지 않았습니다."
+                )
+            except Exception as exc:
+                st.session_state["capture_paste_result"] = ("error", str(exc))
+            st.session_state["capture_paste_last_id"] = event_id
+            st.rerun()
+
+    result = st.session_state.get("capture_paste_result")
+    if result:
+        if result[0] == "success":
+            st.success(result[1])
+        else:
+            st.error(result[1])
+
+    files = list_capture_images()
+    st.markdown(f"**② 저장된 이미지 ({len(files)}장)**")
+    if not files:
+        st.info("아직 저장된 사진이 없습니다. 캡처한 뒤 위 영역을 클릭하고 Ctrl+V를 누르세요.")
+        return
+
+    col_zip, col_refresh = st.columns([1.2, 1])
+    with col_zip:
+        st.download_button(
+            "전체 ZIP 다운로드",
+            data=make_capture_zip(files),
+            file_name="캡처이미지_임시보관함.zip",
+            mime="application/zip",
+            key="capture_download_zip",
+            use_container_width=True,
+        )
+    with col_refresh:
+        if st.button("목록 새로고침", key="capture_refresh", use_container_width=True):
+            st.rerun()
+
+    kst = timezone(timedelta(hours=9))
+    for index, (name, path, size, modified) in enumerate(files[:40]):
+        saved_at = datetime.fromtimestamp(modified, tz=kst).strftime("%m/%d %H:%M:%S")
+        expires_at = datetime.fromtimestamp(modified + CAPTURE_IMAGE_EXPIRE_SECONDS, tz=kst).strftime("%m/%d %H:%M")
+        with st.container():
+            c_preview, c_info, c_download, c_delete = st.columns([1.3, 2.5, 1.05, 0.8])
+            with c_preview:
+                thumb = make_thumbnail_bytes(path, max_size=210)
+                if thumb is not None:
+                    st.image(thumb, width=150)
+                else:
+                    st.caption("미리보기 불가")
+            with c_info:
+                st.markdown(f"**{saved_at} 저장**")
+                st.caption(f"{format_size(size)} · 만료 예정 {expires_at} (한국시간)")
+            with c_download:
+                try:
+                    with open(path, "rb") as f:
+                        st.download_button(
+                            "PNG 저장",
+                            data=f,
+                            file_name=name,
+                            mime="image/png",
+                            key=f"capture_get_{name}",
+                            use_container_width=True,
+                        )
+                except OSError:
+                    st.caption("파일 읽기 실패")
+            with c_delete:
+                if st.button("삭제", key=f"capture_delete_{name}", use_container_width=True):
+                    if delete_file(path):
+                        st.session_state["capture_paste_result"] = ("success", "이미지를 삭제했습니다.")
+                        st.rerun()
+                    else:
+                        st.error("삭제에 실패했습니다.")
+        if index < min(len(files), 40) - 1:
+            st.divider()
+    if len(files) > 40:
+        st.caption(f"화면에는 최신 40장만 표시합니다. 나머지 {len(files)-40}장은 ZIP에서 확인할 수 있습니다.")
+    st.caption("보관 기한이 지나면 다음 접속·조작 때 정리됩니다. Streamlit Cloud 재시작 시에는 더 일찍 사라질 수 있습니다.")
+
+
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
     hide_streamlit_ui()
@@ -3996,6 +4225,9 @@ def main():
     render_shared_notice_board()
 
     render_heat_index_log()
+
+    # 전체 앱의 마지막 섹션: 캡처 이미지 임시보관함
+    render_capture_image_storage()
 
 
 if __name__ == "__main__":
