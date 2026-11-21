@@ -3881,12 +3881,12 @@ CAPTURE_COMPONENT_HTML = r'''<!doctype html>
 <html lang="ko"><head><meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-*{box-sizing:border-box}html,body{margin:0;padding:0;background:transparent;font:13px/1.4 system-ui,-apple-system,"Malgun Gothic",sans-serif;color:#1b365c}
-#zone{padding:2px;outline:none}
+*{box-sizing:border-box}html,body{margin:0;padding:0;height:74px;overflow:hidden;background:transparent;font:12px/1.3 system-ui,-apple-system,"Malgun Gothic",sans-serif;color:#1b365c}
+#zone{padding:0;outline:none}
 #readBtn{width:100%;height:44px;border:1px solid #b8c8df;border-radius:10px;background:#fff;font-size:15px;font-weight:750;color:#234c84;cursor:pointer}
 #readBtn:hover,#zone:focus #readBtn{background:#eef5ff;border-color:#326cd4}
 #readBtn:disabled{opacity:.55;cursor:wait}
-#status{display:none;padding:5px 2px;font-size:12px;color:#355b88}
+#status{height:21px;line-height:21px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:12px;color:#355b88}
 </style></head><body>
 <div id="zone" tabindex="0"><button id="readBtn" type="button">📋 붙여넣기</button></div>
 <div id="status" role="status" aria-live="polite"></div>
@@ -3896,60 +3896,52 @@ CAPTURE_COMPONENT_HTML = r'''<!doctype html>
 const zone=document.getElementById('zone');
 const status=document.getElementById('status');
 const readBtn=document.getElementById('readBtn');
-let busy=false;
-let pendingId=null;
-let timeoutHandle=null;
-function send(type, data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
-function height(){send('streamlit:setFrameHeight',{height:document.documentElement.scrollHeight+6});}
-function note(msg){status.textContent=msg;status.style.display=msg?'block':'none';height();}
+let busy=false,pendingId=null,timeoutHandle=null;
+function send(type,data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
+function note(msg){status.textContent=msg;}
 function makeId(){return String(Date.now())+'_'+Math.random().toString(36).slice(2);}
 function reset(msg){busy=false;pendingId=null;readBtn.disabled=false;if(timeoutHandle)clearTimeout(timeoutHandle);timeoutHandle=null;note(msg);}
 function submit(blob){
- if(busy){return;}
- if(!blob||!String(blob.type||'').startsWith('image/')){note('이미지를 찾지 못했습니다.');return;}
- if(blob.size>10*1024*1024){note('이미지 용량이 10MB를 초과했습니다.');return;}
+ if(busy)return;
+ if(!blob||!String(blob.type||'').startsWith('image/')){note('이미지가 없습니다.');return;}
+ if(blob.size>10*1024*1024){note('최대 10MB까지 저장할 수 있습니다.');return;}
  busy=true;readBtn.disabled=true;note('저장 중...');
  const id=makeId();pendingId=id;
  const reader=new FileReader();
  reader.onerror=()=>reset('이미지를 읽지 못했습니다.');
  reader.onload=()=>{
   const result=String(reader.result||'');const comma=result.indexOf(',');
-  if(comma<0){reset('이미지를 읽지 못했습니다.');return;}
+  if(comma<0){reset('이미지 오류');return;}
   send('streamlit:setComponentValue',{value:{id:id,mime:blob.type||'image/png',data:result.slice(comma+1)}});
-  timeoutHandle=setTimeout(()=>{if(busy)reset('서버 응답이 없습니다. 다시 시도해주세요.');},30000);
+  timeoutHandle=setTimeout(()=>{if(busy)reset('서버 응답 없음. 새로고침 후 확인하세요.');},30000);
  };
  reader.readAsDataURL(blob);
 }
 document.addEventListener('paste',(e)=>{
- const items=e.clipboardData?.items||[];
- let selected=null;
+ const items=e.clipboardData?.items||[];let selected=null;
  for(const item of items){if(item.type&&item.type.startsWith('image/')){selected=item.getAsFile();break;}}
  if(!selected&&e.clipboardData?.files?.length){for(const f of e.clipboardData.files){if(f.type.startsWith('image/')){selected=f;break;}}}
  if(selected){e.preventDefault();submit(selected);}else{note('클립보드에 이미지가 없습니다.');}
 });
 zone.addEventListener('click',(e)=>{if(e.target!==readBtn)zone.focus();});
 readBtn.addEventListener('click',async(e)=>{
- e.stopPropagation();
- if(busy)return;
- // Clicking the button also focuses this iframe, so Ctrl+V remains available if clipboard.read fails.
- if(!navigator.clipboard?.read){zone.focus();note('Ctrl+V를 눌러 붙여넣으세요.');return;}
+ e.stopPropagation();if(busy)return;
+ if(!navigator.clipboard?.read){zone.focus();note('Ctrl+V를 눌러주세요.');return;}
  try{
   const items=await navigator.clipboard.read();
   for(const item of items){const type=item.types.find(t=>t.startsWith('image/'));if(type){submit(await item.getType(type));return;}}
   note('클립보드에 이미지가 없습니다.');zone.focus();
- }catch(error){zone.focus();note('Ctrl+V를 눌러 붙여넣으세요.');}
+ }catch(error){zone.focus();note('Ctrl+V를 눌러주세요.');}
 });
-zone.addEventListener('dragover',(e)=>e.preventDefault());
-zone.addEventListener('drop',(e)=>{e.preventDefault();const f=Array.from(e.dataTransfer?.files||[]).find(f=>f.type.startsWith('image/'));if(f)submit(f);});
+zone.addEventListener('dragover',e=>e.preventDefault());
+zone.addEventListener('drop',e=>{e.preventDefault();const f=Array.from(e.dataTransfer?.files||[]).find(f=>f.type.startsWith('image/'));if(f)submit(f);});
 window.addEventListener('message',(event)=>{
  if(event.data?.type!=='streamlit:render')return;
  const ack=String(event.data.args?.ack||'');
  if(pendingId&&ack===pendingId)reset('');
- height();
 });
+// 고정 높이 컴포넌트: scrollHeight 기반으로 iframe 높이를 계속 키우지 않는다.
 send('streamlit:componentReady',{apiVersion:1});
-window.addEventListener('load',height);
-height();
 })();
 </script></body></html>'''
 
@@ -4052,13 +4044,13 @@ def get_capture_paste_component():
     import streamlit.components.v1 as components
 
     # 컴포넌트는 웹 서버가 제공할 index.html이 필요하므로 /tmp에 자동 생성
-    component_dir = os.path.join(tempfile.gettempdir(), "hec_capture_paste_component_v2")
+    component_dir = os.path.join(tempfile.gettempdir(), "hec_capture_paste_component_v3")
     os.makedirs(component_dir, exist_ok=True)
     html_path = os.path.join(component_dir, "index.html")
     if not os.path.isfile(html_path) or open(html_path, "r", encoding="utf-8").read() != CAPTURE_COMPONENT_HTML:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(CAPTURE_COMPONENT_HTML)
-    return components.declare_component("hec_capture_paste_v2", path=component_dir)
+    return components.declare_component("hec_capture_paste_v3", path=component_dir)
 
 
 def make_capture_zip(files):
@@ -4073,10 +4065,9 @@ def make_capture_zip(files):
 
 
 def render_capture_image_storage():
-    """맨 아래의 단순한 임시보관함: 저장된 PNG를 먼저 보여준다."""
+    """높이 고정 붙여넣기 컴포넌트 + 12장씩 작은 미리보기로 표시."""
     st.markdown("---")
 
-    # 비밀번호가 이미 설정된 배포에서는 기존 접근 제어를 그대로 유지한다.
     try:
         storage_pin = str(st.secrets.get("CAPTURE_STORAGE_PIN", "") or "")
     except Exception:
@@ -4088,9 +4079,7 @@ def render_capture_image_storage():
         if entered_pin != storage_pin:
             return
 
-    files = list_capture_images()
-
-    # 제목과 붙여넣기 버튼을 같은 줄에 배치하고, 아래에 저장 이미지가 즉시 보이도록 한다.
+    # 구성요소 자체에는 별도 스크롤 높이가 생기지 않는다.
     col_title, col_paste = st.columns([4, 1.35])
     with col_title:
         if not storage_pin:
@@ -4100,8 +4089,9 @@ def render_capture_image_storage():
             paste = get_capture_paste_component()
             pasted_event = paste(
                 ack=st.session_state.get("capture_paste_last_id", ""),
-                key="capture_paste_component_widget",
+                key="capture_paste_component_widget_v3",
                 default=None,
+                height=74,
             )
         except Exception as exc:
             st.error(f"붙여넣기 오류: {exc}")
@@ -4115,6 +4105,8 @@ def render_capture_image_storage():
                 st.session_state["capture_paste_result"] = (
                     "success", "저장 완료" if is_new else "이미 저장된 이미지입니다."
                 )
+                # 붙여넣은 사진은 무조건 첫 페이지에서 바로 보이도록 한다.
+                st.session_state["capture_gallery_page"] = 0
             except Exception as exc:
                 st.session_state["capture_paste_result"] = ("error", str(exc))
             st.session_state["capture_paste_last_id"] = event_id
@@ -4124,68 +4116,72 @@ def render_capture_image_storage():
     if result and result[0] == "error":
         st.error(result[1])
 
-    # 목록은 접힌 영역에 넣지 않는다. PNG 원본을 직접 렌더링하므로 미리보기 오류를 줄인다.
     files = list_capture_images()
+    st.markdown(f"**이미지 목록 ({len(files)}장)**")
     if not files:
         st.caption("저장된 이미지 없음")
         return
 
-    st.markdown(f"**이미지 목록 ({len(files)})**")
-    if files:
-        c_zip, c_refresh = st.columns([1, 1])
-        with c_zip:
-            st.download_button(
-                "전체 ZIP 다운로드",
-                data=make_capture_zip(files),
-                file_name="임시보관함_전체.zip",
-                mime="application/zip",
-                key="capture_download_zip",
-                use_container_width=True,
-            )
-        with c_refresh:
-            if st.button("새로고침", key="capture_refresh", use_container_width=True):
-                st.rerun()
+    c_zip, c_refresh = st.columns([1, 1])
+    with c_zip:
+        st.download_button(
+            "전체 ZIP 다운로드",
+            data=make_capture_zip(files),
+            file_name="임시보관함_전체.zip",
+            mime="application/zip",
+            key="capture_download_zip",
+            use_container_width=True,
+        )
+    with c_refresh:
+        if st.button("새로고침", key="capture_refresh", use_container_width=True):
+            st.rerun()
 
+    # 이미지가 수십 장 쌓여도 페이지 높이가 끝없이 길어지지 않도록 최대 12장만 표시.
+    per_page = 12
+    page_count = max(1, (len(files) + per_page - 1) // per_page)
+    page = min(max(int(st.session_state.get("capture_gallery_page", 0)), 0), page_count - 1)
+    st.session_state["capture_gallery_page"] = page
+    current = files[page * per_page:(page + 1) * per_page]
     kst = timezone(timedelta(hours=9))
-    for index, (name, path, size, modified) in enumerate(files[:60]):
-        saved_at = datetime.fromtimestamp(modified, tz=kst).strftime("%m/%d %H:%M:%S")
-        with st.container():
-            c_preview, c_actions = st.columns([4, 1.2])
-            with c_preview:
-                try:
-                    # 원본 PNG를 사용해 기존 작은 JPEG 미리보기에서 발생할 수 있는 표시 문제 방지
-                    st.image(path, width=440)
-                except Exception:
-                    thumb = make_thumbnail_bytes(path, max_size=350)
-                    if thumb is not None:
-                        st.image(thumb, width=350)
-                    else:
-                        st.error("이미지를 표시하지 못했습니다.")
+    for offset in range(0, len(current), 3):
+        cols = st.columns(3)
+        for i, col in enumerate(cols):
+            if offset + i >= len(current):
+                break
+            name, path, size, modified = current[offset + i]
+            saved_at = datetime.fromtimestamp(modified, tz=kst).strftime("%m/%d %H:%M:%S")
+            with col:
+                thumb = make_thumbnail_bytes(path, max_size=220)
+                if thumb is not None:
+                    st.image(thumb, width=220)
+                else:
+                    st.caption("미리보기 불가")
                 st.caption(f"{saved_at} · {format_size(size)}")
-            with c_actions:
                 try:
                     with open(path, "rb") as f:
                         st.download_button(
-                            "PNG 다운로드",
-                            data=f,
-                            file_name=name,
-                            mime="image/png",
-                            key=f"capture_get_{name}",
-                            use_container_width=True,
+                            "다운로드", data=f, file_name=name, mime="image/png",
+                            key=f"capture_get_{name}", use_container_width=True,
                         )
                 except OSError:
                     st.error("읽기 오류")
                 if st.button("삭제", key=f"capture_delete_{name}", use_container_width=True):
                     if delete_file(path):
                         st.rerun()
-                    else:
-                        st.error("삭제 실패")
-        if index < min(len(files), 60) - 1:
-            st.divider()
-    if len(files) > 60:
-        st.caption(f"최신 60장 표시 중 · 나머지 {len(files)-60}장은 ZIP 다운로드")
+                    st.error("삭제 실패")
 
-
+    if page_count > 1:
+        c_prev, c_page, c_next = st.columns([1, 1, 1])
+        with c_prev:
+            if st.button("이전", disabled=(page == 0), key="capture_gallery_prev", use_container_width=True):
+                st.session_state["capture_gallery_page"] = page - 1
+                st.rerun()
+        with c_page:
+            st.caption(f"{page + 1} / {page_count} 페이지")
+        with c_next:
+            if st.button("다음", disabled=(page >= page_count - 1), key="capture_gallery_next", use_container_width=True):
+                st.session_state["capture_gallery_page"] = page + 1
+                st.rerun()
 
 def main():
     st.set_page_config(page_title="TBM PPT Maker", layout="wide")
