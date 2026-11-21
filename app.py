@@ -3878,26 +3878,18 @@ CAPTURE_IMAGE_EXPIRE_SECONDS = 24 * 60 * 60
 CAPTURE_IMAGE_MAX_SINGLE_BYTES = 10 * 1024 * 1024
 CAPTURE_IMAGE_MAX_TOTAL_BYTES = 200 * 1024 * 1024
 CAPTURE_COMPONENT_HTML = r'''<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8" />
+<html lang="ko"><head><meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
-*{box-sizing:border-box}body{margin:0;padding:3px;font:14px/1.55 system-ui,-apple-system,"Malgun Gothic",sans-serif;color:#182639;background:transparent}
-#zone{outline:none;border:2px dashed #97b5e9;border-radius:14px;background:#f8fbff;padding:26px 14px;text-align:center;cursor:pointer;transition:background .2s,border-color .2s}
-#zone:hover,#zone:focus,#zone.drag{background:#eaf3ff;border-color:#326cd4}
-#mark{font-size:26px;display:block;margin-bottom:6px}strong{font-size:19px;color:#123d75}p{margin:4px 0;color:#4b617b}.kbd{display:inline-block;padding:2px 9px;border:1px solid #b7c7dd;border-bottom:3px solid #b7c7dd;border-radius:6px;background:white;font-weight:700;color:#214e85}
-button{border:1px solid #c1d1e8;border-radius:9px;background:#fff;color:#234c84;font-size:13px;font-weight:700;margin-top:12px;padding:8px 16px;cursor:pointer}button:disabled{opacity:.55;cursor:wait}
-#status{margin-top:8px;min-height:22px;font-size:13px;color:#2d597c;text-align:center}
-</style>
-</head>
-<body>
-<div id="zone" tabindex="0" role="button" aria-label="캡처 이미지를 붙여넣으려면 이 영역을 클릭한 뒤 Ctrl+V를 누르세요">
-<span id="mark">📋</span><strong>여기를 클릭하고 <span class="kbd">Ctrl + V</span></strong>
-<p>Win + Shift + S로 캡처한 사진을 붙여넣으면 서버에 PNG 파일로 저장됩니다.</p>
-<button id="readBtn" type="button">클립보드에서 붙여넣기</button>
-</div>
-<div id="status" role="status" aria-live="polite">이 영역을 한 번 클릭한 뒤 Ctrl+V를 눌러주세요.</div>
+*{box-sizing:border-box}html,body{margin:0;padding:0;background:transparent;font:13px/1.4 system-ui,-apple-system,"Malgun Gothic",sans-serif;color:#1b365c}
+#zone{padding:2px;outline:none}
+#readBtn{width:100%;height:44px;border:1px solid #b8c8df;border-radius:10px;background:#fff;font-size:15px;font-weight:750;color:#234c84;cursor:pointer}
+#readBtn:hover,#zone:focus #readBtn{background:#eef5ff;border-color:#326cd4}
+#readBtn:disabled{opacity:.55;cursor:wait}
+#status{display:none;padding:5px 2px;font-size:12px;color:#355b88}
+</style></head><body>
+<div id="zone" tabindex="0"><button id="readBtn" type="button">📋 붙여넣기</button></div>
+<div id="status" role="status" aria-live="polite"></div>
 <script>
 (function(){
 'use strict';
@@ -3908,64 +3900,58 @@ let busy=false;
 let pendingId=null;
 let timeoutHandle=null;
 function send(type, data){window.parent.postMessage(Object.assign({isStreamlitMessage:true,type:type},data||{}),'*');}
-function height(){send('streamlit:setFrameHeight',{height:document.documentElement.scrollHeight+8});}
-function note(msg){status.textContent=msg;height();}
+function height(){send('streamlit:setFrameHeight',{height:document.documentElement.scrollHeight+6});}
+function note(msg){status.textContent=msg;status.style.display=msg?'block':'none';height();}
 function makeId(){return String(Date.now())+'_'+Math.random().toString(36).slice(2);}
 function reset(msg){busy=false;pendingId=null;readBtn.disabled=false;if(timeoutHandle)clearTimeout(timeoutHandle);timeoutHandle=null;note(msg);}
 function submit(blob){
- if(busy){note('이전 사진을 저장하는 중입니다. 잠시 기다려주세요.');return;}
- if(!blob||!String(blob.type||'').startsWith('image/')){note('이미지가 없습니다. 먼저 화면을 캡처해주세요.');return;}
- if(blob.size>10*1024*1024){note('한 장은 10MB까지만 저장할 수 있습니다.');return;}
- busy=true;readBtn.disabled=true;note('사진을 서버에 저장하는 중...');
- const id=makeId(); pendingId=id;
+ if(busy){return;}
+ if(!blob||!String(blob.type||'').startsWith('image/')){note('이미지를 찾지 못했습니다.');return;}
+ if(blob.size>10*1024*1024){note('이미지 용량이 10MB를 초과했습니다.');return;}
+ busy=true;readBtn.disabled=true;note('저장 중...');
+ const id=makeId();pendingId=id;
  const reader=new FileReader();
- reader.onerror=()=>reset('이미지를 읽지 못했습니다. 다시 시도해주세요.');
+ reader.onerror=()=>reset('이미지를 읽지 못했습니다.');
  reader.onload=()=>{
-  const result=String(reader.result||'');
-  const comma=result.indexOf(',');
-  if(comma===-1){reset('이미지 데이터를 읽을 수 없습니다.');return;}
+  const result=String(reader.result||'');const comma=result.indexOf(',');
+  if(comma<0){reset('이미지를 읽지 못했습니다.');return;}
   send('streamlit:setComponentValue',{value:{id:id,mime:blob.type||'image/png',data:result.slice(comma+1)}});
-  timeoutHandle=setTimeout(()=>{if(busy)reset('서버 응답이 없습니다. 저장 목록을 확인한 뒤 다시 시도해주세요.');},30000);
+  timeoutHandle=setTimeout(()=>{if(busy)reset('서버 응답이 없습니다. 다시 시도해주세요.');},30000);
  };
  reader.readAsDataURL(blob);
 }
-zone.addEventListener('click',(e)=>{if(e.target!==readBtn){zone.focus();}});
 document.addEventListener('paste',(e)=>{
  const items=e.clipboardData?.items||[];
- let image=null;
- for(const item of items){if(item.type&&item.type.startsWith('image/')){image=item.getAsFile();break;}}
- if(!image&&e.clipboardData?.files?.length){for(const f of e.clipboardData.files){if(f.type.startsWith('image/')){image=f;break;}}}
- if(image){e.preventDefault();submit(image);}else{note('클립보드에 이미지가 없습니다. Win + Shift + S로 캡처한 뒤 다시 붙여넣으세요.');}
+ let selected=null;
+ for(const item of items){if(item.type&&item.type.startsWith('image/')){selected=item.getAsFile();break;}}
+ if(!selected&&e.clipboardData?.files?.length){for(const f of e.clipboardData.files){if(f.type.startsWith('image/')){selected=f;break;}}}
+ if(selected){e.preventDefault();submit(selected);}else{note('클립보드에 이미지가 없습니다.');}
 });
+zone.addEventListener('click',(e)=>{if(e.target!==readBtn)zone.focus();});
 readBtn.addEventListener('click',async(e)=>{
  e.stopPropagation();
  if(busy)return;
- if(!navigator.clipboard?.read){note('브라우저에서 직접 읽기를 지원하지 않습니다. 영역 클릭 후 Ctrl+V를 이용하세요.');zone.focus();return;}
+ // Clicking the button also focuses this iframe, so Ctrl+V remains available if clipboard.read fails.
+ if(!navigator.clipboard?.read){zone.focus();note('Ctrl+V를 눌러 붙여넣으세요.');return;}
  try{
   const items=await navigator.clipboard.read();
-  for(const item of items){
-   const type=item.types.find(t=>t.startsWith('image/'));
-   if(type){submit(await item.getType(type));return;}
-  }
-  note('클립보드에 이미지가 없습니다.');
- }catch(error){note('클립보드 접근이 차단되었습니다. 영역 클릭 후 Ctrl+V를 이용하세요.');zone.focus();}
+  for(const item of items){const type=item.types.find(t=>t.startsWith('image/'));if(type){submit(await item.getType(type));return;}}
+  note('클립보드에 이미지가 없습니다.');zone.focus();
+ }catch(error){zone.focus();note('Ctrl+V를 눌러 붙여넣으세요.');}
 });
-zone.addEventListener('dragover',(e)=>{e.preventDefault();zone.classList.add('drag');});
-zone.addEventListener('dragleave',()=>zone.classList.remove('drag'));
-zone.addEventListener('drop',(e)=>{e.preventDefault();zone.classList.remove('drag');const f=Array.from(e.dataTransfer?.files||[]).find(f=>f.type.startsWith('image/'));if(f)submit(f);else note('이미지 파일을 끌어다 놓으세요.');});
+zone.addEventListener('dragover',(e)=>e.preventDefault());
+zone.addEventListener('drop',(e)=>{e.preventDefault();const f=Array.from(e.dataTransfer?.files||[]).find(f=>f.type.startsWith('image/'));if(f)submit(f);});
 window.addEventListener('message',(event)=>{
  if(event.data?.type!=='streamlit:render')return;
  const ack=String(event.data.args?.ack||'');
- if(pendingId&&ack===pendingId){reset('저장 처리 완료! 아래 이미지 목록에서 확인하세요.');}
+ if(pendingId&&ack===pendingId)reset('');
  height();
 });
 send('streamlit:componentReady',{apiVersion:1});
 window.addEventListener('load',height);
 height();
 })();
-</script>
-</body>
-</html>'''
+</script></body></html>'''
 
 
 def cleanup_expired_capture_images():
@@ -4066,13 +4052,13 @@ def get_capture_paste_component():
     import streamlit.components.v1 as components
 
     # 컴포넌트는 웹 서버가 제공할 index.html이 필요하므로 /tmp에 자동 생성
-    component_dir = os.path.join(tempfile.gettempdir(), "hec_capture_paste_component_v1")
+    component_dir = os.path.join(tempfile.gettempdir(), "hec_capture_paste_component_v2")
     os.makedirs(component_dir, exist_ok=True)
     html_path = os.path.join(component_dir, "index.html")
     if not os.path.isfile(html_path) or open(html_path, "r", encoding="utf-8").read() != CAPTURE_COMPONENT_HTML:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(CAPTURE_COMPONENT_HTML)
-    return components.declare_component("hec_capture_paste", path=component_dir)
+    return components.declare_component("hec_capture_paste_v2", path=component_dir)
 
 
 def make_capture_zip(files):
@@ -4087,38 +4073,39 @@ def make_capture_zip(files):
 
 
 def render_capture_image_storage():
-    """전체 웹앱의 맨 하단에 화면 캡처 임시보관함을 배치."""
+    """맨 아래의 단순한 임시보관함: 저장된 PNG를 먼저 보여준다."""
     st.markdown("---")
-    st.markdown("### 📋 캡처 이미지 임시보관함")
-    st.caption("화면 캡처 → 붙여넣기 → PNG 자동 저장 · 저장 시점부터 24시간 보관")
 
-    # 옵션: Streamlit Secrets에 CAPTURE_STORAGE_PIN을 지정하면 이 구역만 접근 제한
+    # 비밀번호가 이미 설정된 배포에서는 기존 접근 제어를 그대로 유지한다.
     try:
         storage_pin = str(st.secrets.get("CAPTURE_STORAGE_PIN", "") or "")
     except Exception:
         storage_pin = ""
+
     if storage_pin:
-        entered_pin = st.text_input("임시보관함 비밀번호", type="password", key="capture_storage_pin_input")
+        st.markdown("### 임시보관함")
+        entered_pin = st.text_input("비밀번호", type="password", key="capture_storage_pin_input")
         if entered_pin != storage_pin:
-            st.info("사진을 보거나 붙여넣으려면 비밀번호를 입력하세요.")
             return
-    else:
-        st.caption("주의: 별도 비밀번호를 설정하지 않으면 앱 방문자 누구나 보관된 이미지를 확인·삭제할 수 있습니다.")
 
     files = list_capture_images()
-    used_bytes = sum(item[2] for item in files)
-    st.caption(f"저장 {len(files)}장  |  사용량 {format_size(used_bytes)} / 200MB  |  개별 이미지 최대 10MB")
-    st.markdown("**① 붙여넣기 영역**")
-    try:
-        paste = get_capture_paste_component()
-        pasted_event = paste(
-            ack=st.session_state.get("capture_paste_last_id", ""),
-            key="capture_paste_component_widget",
-            default=None,
-        )
-    except Exception as exc:
-        st.error(f"붙여넣기 영역을 열지 못했습니다: {exc}")
-        return
+
+    # 제목과 붙여넣기 버튼을 같은 줄에 배치하고, 아래에 저장 이미지가 즉시 보이도록 한다.
+    col_title, col_paste = st.columns([4, 1.35])
+    with col_title:
+        if not storage_pin:
+            st.markdown("### 임시보관함")
+    with col_paste:
+        try:
+            paste = get_capture_paste_component()
+            pasted_event = paste(
+                ack=st.session_state.get("capture_paste_last_id", ""),
+                key="capture_paste_component_widget",
+                default=None,
+            )
+        except Exception as exc:
+            st.error(f"붙여넣기 오류: {exc}")
+            return
 
     if isinstance(pasted_event, dict) and pasted_event.get("id"):
         event_id = str(pasted_event["id"])
@@ -4126,60 +4113,60 @@ def render_capture_image_storage():
             try:
                 filename, is_new = save_pasted_capture_image(pasted_event)
                 st.session_state["capture_paste_result"] = (
-                    "success", f"저장 완료: {filename}" if is_new else "이미 보관 중인 사진입니다. 중복 저장하지 않았습니다."
+                    "success", "저장 완료" if is_new else "이미 저장된 이미지입니다."
                 )
             except Exception as exc:
                 st.session_state["capture_paste_result"] = ("error", str(exc))
             st.session_state["capture_paste_last_id"] = event_id
             st.rerun()
 
-    result = st.session_state.get("capture_paste_result")
-    if result:
-        if result[0] == "success":
-            st.success(result[1])
-        else:
-            st.error(result[1])
+    result = st.session_state.pop("capture_paste_result", None)
+    if result and result[0] == "error":
+        st.error(result[1])
 
+    # 목록은 접힌 영역에 넣지 않는다. PNG 원본을 직접 렌더링하므로 미리보기 오류를 줄인다.
     files = list_capture_images()
-    st.markdown(f"**② 저장된 이미지 ({len(files)}장)**")
     if not files:
-        st.info("아직 저장된 사진이 없습니다. 캡처한 뒤 위 영역을 클릭하고 Ctrl+V를 누르세요.")
+        st.caption("저장된 이미지 없음")
         return
 
-    col_zip, col_refresh = st.columns([1.2, 1])
-    with col_zip:
-        st.download_button(
-            "전체 ZIP 다운로드",
-            data=make_capture_zip(files),
-            file_name="캡처이미지_임시보관함.zip",
-            mime="application/zip",
-            key="capture_download_zip",
-            use_container_width=True,
-        )
-    with col_refresh:
-        if st.button("목록 새로고침", key="capture_refresh", use_container_width=True):
-            st.rerun()
+    st.markdown(f"**이미지 목록 ({len(files)})**")
+    if files:
+        c_zip, c_refresh = st.columns([1, 1])
+        with c_zip:
+            st.download_button(
+                "전체 ZIP 다운로드",
+                data=make_capture_zip(files),
+                file_name="임시보관함_전체.zip",
+                mime="application/zip",
+                key="capture_download_zip",
+                use_container_width=True,
+            )
+        with c_refresh:
+            if st.button("새로고침", key="capture_refresh", use_container_width=True):
+                st.rerun()
 
     kst = timezone(timedelta(hours=9))
-    for index, (name, path, size, modified) in enumerate(files[:40]):
+    for index, (name, path, size, modified) in enumerate(files[:60]):
         saved_at = datetime.fromtimestamp(modified, tz=kst).strftime("%m/%d %H:%M:%S")
-        expires_at = datetime.fromtimestamp(modified + CAPTURE_IMAGE_EXPIRE_SECONDS, tz=kst).strftime("%m/%d %H:%M")
         with st.container():
-            c_preview, c_info, c_download, c_delete = st.columns([1.3, 2.5, 1.05, 0.8])
+            c_preview, c_actions = st.columns([4, 1.2])
             with c_preview:
-                thumb = make_thumbnail_bytes(path, max_size=210)
-                if thumb is not None:
-                    st.image(thumb, width=150)
-                else:
-                    st.caption("미리보기 불가")
-            with c_info:
-                st.markdown(f"**{saved_at} 저장**")
-                st.caption(f"{format_size(size)} · 만료 예정 {expires_at} (한국시간)")
-            with c_download:
+                try:
+                    # 원본 PNG를 사용해 기존 작은 JPEG 미리보기에서 발생할 수 있는 표시 문제 방지
+                    st.image(path, width=440)
+                except Exception:
+                    thumb = make_thumbnail_bytes(path, max_size=350)
+                    if thumb is not None:
+                        st.image(thumb, width=350)
+                    else:
+                        st.error("이미지를 표시하지 못했습니다.")
+                st.caption(f"{saved_at} · {format_size(size)}")
+            with c_actions:
                 try:
                     with open(path, "rb") as f:
                         st.download_button(
-                            "PNG 저장",
+                            "PNG 다운로드",
                             data=f,
                             file_name=name,
                             mime="image/png",
@@ -4187,19 +4174,17 @@ def render_capture_image_storage():
                             use_container_width=True,
                         )
                 except OSError:
-                    st.caption("파일 읽기 실패")
-            with c_delete:
+                    st.error("읽기 오류")
                 if st.button("삭제", key=f"capture_delete_{name}", use_container_width=True):
                     if delete_file(path):
-                        st.session_state["capture_paste_result"] = ("success", "이미지를 삭제했습니다.")
                         st.rerun()
                     else:
-                        st.error("삭제에 실패했습니다.")
-        if index < min(len(files), 40) - 1:
+                        st.error("삭제 실패")
+        if index < min(len(files), 60) - 1:
             st.divider()
-    if len(files) > 40:
-        st.caption(f"화면에는 최신 40장만 표시합니다. 나머지 {len(files)-40}장은 ZIP에서 확인할 수 있습니다.")
-    st.caption("보관 기한이 지나면 다음 접속·조작 때 정리됩니다. Streamlit Cloud 재시작 시에는 더 일찍 사라질 수 있습니다.")
+    if len(files) > 60:
+        st.caption(f"최신 60장 표시 중 · 나머지 {len(files)-60}장은 ZIP 다운로드")
+
 
 
 def main():
