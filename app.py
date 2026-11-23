@@ -4118,7 +4118,7 @@ def render_capture_image_storage():
     files = list_capture_images()
     st.markdown(f"**보관함 ({len(files)}장)**")
     if not files:
-        st.caption("저장된 이미지 없음")
+        st.caption(" ")
         return
 
     c_zip, c_refresh = st.columns([1, 1])
