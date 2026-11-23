@@ -53,7 +53,6 @@ OPENAI_MODEL = "gpt-6-luna"
 BASE_FONT_SIZE_PT = 35
 OUTPUT_PPT_NAME = "TBM_완성본.pptx"
 DAILY_OUTPUT_PPT_NAME = "일일안전회의_완성본.pptx"
-APP_VERSION = "26년 9월 최적화 안정화 버전"
 
 # 대량 업로드/고용량 사진 안정화 설정
 TBM_IMAGE_MAX_SIZE = 1200
@@ -230,7 +229,7 @@ def render_app_title():
                 padding:0;
                 line-height:1.2;
             ">
-                🚧 TBM 교육자료 자동 번역 생성기 [{APP_VERSION}]
+                🚧 TBM 교육자료 자동 번역 생성기
             </h2>
         </div>
         """,
@@ -4117,7 +4116,7 @@ def render_capture_image_storage():
         st.error(result[1])
 
     files = list_capture_images()
-    st.markdown(f"**이미지 목록 ({len(files)}장)**")
+    st.markdown(f"**보관함 ({len(files)}장)**")
     if not files:
         st.caption("저장된 이미지 없음")
         return
