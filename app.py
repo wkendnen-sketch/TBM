@@ -4116,7 +4116,7 @@ def render_capture_image_storage():
         st.error(result[1])
 
     files = list_capture_images()
-    st.markdown(f"**보관함 ({len(files)}장)**")
+    st.markdown(f"**보관함 ({len(files)})**")
     if not files:
         st.caption(" ")
         return
